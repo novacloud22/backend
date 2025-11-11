@@ -491,7 +491,7 @@ async def setup_drive():
             'credentials.json',
             scopes=['https://www.googleapis.com/auth/drive.file']
         )
-        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
         
         authorization_url, state = flow.authorization_url(
             access_type='offline',
@@ -526,7 +526,7 @@ async def connect_personal_drive(drive_id: str = "drive_1", current_user: str = 
                 'openid'
             ]
         )
-        flow.redirect_uri = GOOGLE_REDIRECT_URI
+        flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
         
         state_value = f'user:{current_user}:drive:{drive_id}'
         print(f"Generating auth URL with state: {state_value}")
@@ -630,7 +630,8 @@ async def oauth2callback(code: str, state: Optional[str] = None):
         )
         flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
         
-        flow.fetch_token(code=code)
+        # Add redirect_uri parameter to match what was used in authorization
+        flow.fetch_token(code=code, redirect_uri=flow.redirect_uri)
         credentials = flow.credentials
         
         # Ensure we have at least the drive.file scope
