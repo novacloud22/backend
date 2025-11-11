@@ -702,12 +702,12 @@ async def oauth2callback(code: str, state: Optional[str] = None):
             
     except Exception as e:
         print(f"OAuth callback error: {str(e)}")
-        print(f"Error type: {type(e)}")
-        import traceback
-        print(f"Traceback: {traceback.format_exc()}")
         
         if state and state.startswith('user:'):
-            error_url = f"{frontend_url}/dashboard?error=auth_failed&message={str(e).replace(' ', '%20')}"
+            if 'invalid_grant' in str(e).lower():
+                error_url = f"{frontend_url}/dashboard?error=oauth_expired&message=Please%20try%20connecting%20again"
+            else:
+                error_url = f"{frontend_url}/dashboard?error=auth_failed&message={str(e).replace(' ', '%20')}"
             print(f"Error redirect to: {error_url}")
             return RedirectResponse(
                 url=error_url,
