@@ -489,7 +489,12 @@ async def setup_drive():
     try:
         flow = Flow.from_client_secrets_file(
             'credentials.json',
-            scopes=['https://www.googleapis.com/auth/drive.file']
+            scopes=[
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/userinfo.profile',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'openid'
+            ]
         )
         flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
         
@@ -519,8 +524,11 @@ async def connect_personal_drive(drive_id: str = "drive_1", current_user: str = 
     try:
         flow = Flow.from_client_secrets_file(
             'credentials.json',
-                scopes=[
-                'https://www.googleapis.com/auth/drive.file'
+            scopes=[
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/userinfo.profile',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'openid'
             ]
         )
         flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
@@ -630,7 +638,10 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                 }
             },
             scopes=[
-                'https://www.googleapis.com/auth/drive.file'
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/userinfo.profile',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'openid'
             ]
         )
         flow.redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'https://backend-vjzu.onrender.com/oauth2callback')
@@ -639,8 +650,9 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
         flow.fetch_token(code=code)
         credentials = flow.credentials
         
-        # Ensure we have at least the drive.file scope
-        if 'https://www.googleapis.com/auth/drive.file' not in credentials.scopes:
+        # Ensure we have the required scopes
+        required_scopes = ['https://www.googleapis.com/auth/drive.file']
+        if not any(scope in credentials.scopes for scope in required_scopes):
             raise Exception("Required drive.file scope not granted")
         
         # Check if this is for a personal drive connection
