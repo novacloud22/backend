@@ -1104,6 +1104,7 @@ async def list_files(
             return []
         if show_all:
             folder_query = "trashed=false"
+            print(f"Personal drive show_all query: {folder_query}")
         else:
             folder_query = "'root' in parents and trashed=false"
     else:
@@ -1111,16 +1112,18 @@ async def list_files(
         if not service:
             return []
         
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            return []
+        
+        user_folder_id = user_data.get('folder_id')
+        if not user_folder_id:
+            return []
+        
         if show_all:
-            folder_query = "trashed=false"
+            # For shared drive, show all files within user's folder recursively
+            folder_query = f"'{user_folder_id}' in parents and trashed=false"
         else:
-            user_data = get_user_from_firestore(current_user)
-            if not user_data:
-                return []
-            
-            user_folder_id = user_data.get('folder_id')
-            if not user_folder_id:
-                return []
             folder_query = f"'{user_folder_id}' in parents and trashed=false"
     
     try:
@@ -1144,36 +1147,63 @@ async def list_files(
             if not page_token:
                 break
         
+        # Build folder path cache for better performance
+        folder_cache = {}
+        if show_all and use_personal_drive:
+            try:
+                # Get all folders first to build path cache
+                folder_results = service.files().list(
+                    q="mimeType='application/vnd.google-apps.folder' and trashed=false",
+                    fields="files(id,name,parents)",
+                    pageSize=1000
+                ).execute()
+                
+                for folder in folder_results.get('files', []):
+                    folder_cache[folder['id']] = folder.get('name', '')
+            except:
+                pass
+        
         # Process files and add folder paths for show_all mode
         processed_files = []
         for file in all_files:
-            if show_all and file.get('parents'):
+            if show_all and use_personal_drive and file.get('parents'):
                 # Get folder path for better organization
                 try:
                     parent_id = file['parents'][0]
-                    if parent_id != 'root':
-                        parent = service.files().get(fileId=parent_id, fields='name').execute()
-                        file['folder_path'] = parent.get('name', '')
+                    if parent_id != 'root' and parent_id in folder_cache:
+                        file['folder_path'] = folder_cache[parent_id]
+                    elif parent_id != 'root':
+                        try:
+                            parent = service.files().get(fileId=parent_id, fields='name').execute()
+                            file['folder_path'] = parent.get('name', '')
+                            folder_cache[parent_id] = file['folder_path']
+                        except:
+                            file['folder_path'] = 'Unknown Folder'
+                    else:
+                        file['folder_path'] = 'Root'
                 except:
                     file['folder_path'] = ''
             
             if file.get('mimeType') == 'application/vnd.google-apps.folder':
-                # Calculate folder size
-                try:
-                    folder_files = service.files().list(
-                        q=f"'{file['id']}' in parents and trashed=false",
-                        fields="files(size)"
-                    ).execute().get('files', [])
-                    total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
-                    file['size'] = total_size
-                except:
+                # Calculate folder size only for non-show-all mode to improve performance
+                if not show_all:
+                    try:
+                        folder_files = service.files().list(
+                            q=f"'{file['id']}' in parents and trashed=false",
+                            fields="files(size)"
+                        ).execute().get('files', [])
+                        total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
+                        file['size'] = total_size
+                    except:
+                        file['size'] = 0
+                else:
                     file['size'] = 0
             
             processed_files.append(FileInfo(**file))
         
         return processed_files
     except Exception as e:
-        print(f"Error listing files: {str(e)}")
+        print(f"Error listing files for user {current_user}, personal_drive={use_personal_drive}, show_all={show_all}: {str(e)}")
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
@@ -1349,13 +1379,50 @@ async def delete_file(
     
     try:
         service.files().delete(fileId=file_id).execute()
-        # Update user storage in real-time
-        update_user_storage(current_user)
+        # Update user storage in real-time (only for shared drive)
+        if not use_personal_drive:
+            update_user_storage(current_user)
         return {"message": "File deleted successfully"}
     except Exception as e:
         if "File not found" in str(e) or "404" in str(e):
             return {"message": "File already deleted or not found"}
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+
+@app.post("/batch-delete")
+async def batch_delete_files(
+    file_ids: List[str],
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: str = Depends(get_current_user)
+):
+    """Delete multiple files in batch"""
+    if use_personal_drive:
+        service = get_user_google_service(current_user, drive_id)
+    else:
+        service = get_google_service()
+    
+    if not service:
+        raise HTTPException(status_code=500, detail="Google Drive not configured")
+    
+    results = []
+    for file_id in file_ids:
+        try:
+            service.files().delete(fileId=file_id).execute()
+            results.append({"file_id": file_id, "success": True})
+        except Exception as e:
+            results.append({"file_id": file_id, "success": False, "error": str(e)})
+    
+    # Update user storage in real-time (only for shared drive)
+    if not use_personal_drive:
+        update_user_storage(current_user)
+    
+    successful_deletes = sum(1 for r in results if r["success"])
+    return {
+        "message": f"Deleted {successful_deletes} of {len(file_ids)} files",
+        "results": results,
+        "total_files": len(file_ids),
+        "successful_deletes": successful_deletes
+    }
 
 
 
