@@ -1104,6 +1104,7 @@ async def list_files(
             return []
         if show_all:
             folder_query = "trashed=false"
+            print(f"Personal drive show_all query: {folder_query}")
         else:
             folder_query = "'root' in parents and trashed=false"
     else:
@@ -1202,7 +1203,7 @@ async def list_files(
         
         return processed_files
     except Exception as e:
-        print(f"Error listing files: {str(e)}")
+        print(f"Error listing files for user {current_user}, personal_drive={use_personal_drive}, show_all={show_all}: {str(e)}")
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
