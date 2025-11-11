@@ -1101,12 +1101,14 @@ async def list_files(
     if use_personal_drive:
         service = get_user_google_service(current_user, drive_id)
         if not service:
+            print(f"No service available for {current_user} - {drive_id}")
             return []
         if show_all:
             folder_query = "trashed=false"
             print(f"Personal drive show_all query: {folder_query}")
         else:
             folder_query = "'root' in parents and trashed=false"
+            print(f"Personal drive root query: {folder_query}")
     else:
         service = get_google_service()
         if not service:
@@ -1130,6 +1132,8 @@ async def list_files(
         all_files = []
         page_token = None
         
+        print(f"Starting file listing for {current_user} - {drive_id}")
+        
         while True:
             params = {
                 'q': folder_query,
@@ -1141,11 +1145,14 @@ async def list_files(
                 
             results = service.files().list(**params).execute()
             files = results.get('files', [])
+            print(f"Got {len(files)} files in this batch")
             all_files.extend(files)
             
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
+        
+        print(f"Total files found: {len(all_files)}")
         
         # Build folder path cache for better performance
         folder_cache = {}
@@ -1201,9 +1208,12 @@ async def list_files(
             
             processed_files.append(FileInfo(**file))
         
+        print(f"Returning {len(processed_files)} processed files")
         return processed_files
     except Exception as e:
         print(f"Error listing files for user {current_user}, personal_drive={use_personal_drive}, show_all={show_all}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
