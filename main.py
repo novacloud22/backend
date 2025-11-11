@@ -130,6 +130,7 @@ class FileInfo(BaseModel):
     webContentLink: Optional[str] = None
     path: Optional[str] = None
     basename: Optional[str] = None
+    parent_folder: Optional[str] = None
 
 class TwoFASetup(BaseModel):
     secret: str
@@ -616,7 +617,7 @@ async def get_personal_drive_status(current_user: str = Depends(get_current_user
 
 @app.get("/oauth2callback")
 async def oauth2callback(code: str, state: Optional[str] = None):
-    frontend_url = os.getenv('FRONTEND_URL', 'https://novacloud22.web.app/')
+    frontend_url = os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')
     
     try:
         flow = Flow.from_client_secrets_file(
@@ -1009,13 +1010,21 @@ async def get_parallel_data(
 async def list_files(
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
+    folder_id: Optional[str] = None,
     current_user: str = Depends(get_current_user)
 ):
     if use_personal_drive:
         service = get_user_google_service(current_user, drive_id)
         if not service:
             return []
-        folder_query = "'root' in parents and trashed=false"
+        
+        # If folder_id is provided, show that folder's contents
+        # Otherwise show ALL files from the entire Google Drive
+        if folder_id:
+            folder_query = f"'{folder_id}' in parents and trashed=false"
+        else:
+            # Show ALL files from entire Google Drive (not just root)
+            folder_query = "trashed=false"
     else:
         service = get_google_service()
         if not service:
@@ -1028,12 +1037,17 @@ async def list_files(
         user_folder_id = user_data.get('folder_id')
         if not user_folder_id:
             return []
-        folder_query = f"'{user_folder_id}' in parents and trashed=false"
+        
+        if folder_id:
+            folder_query = f"'{folder_id}' in parents and trashed=false"
+        else:
+            folder_query = f"'{user_folder_id}' in parents and trashed=false"
     
     try:
         results = service.files().list(
             q=folder_query,
-            fields="files(id,name,size,mimeType,createdTime,webViewLink,webContentLink)"
+            fields="files(id,name,size,mimeType,createdTime,webViewLink,webContentLink,parents)",
+            pageSize=1000  # Increase page size to get more files
         ).execute()
         files = results.get('files', [])
         
@@ -1048,10 +1062,24 @@ async def list_files(
                 ).execute().get('files', [])
                 total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
                 file['size'] = total_size
+            
+            # Add parent folder info for personal drive to show file location
+            if use_personal_drive and not folder_id:
+                parents = file.get('parents', [])
+                if parents and parents[0] != 'root':
+                    try:
+                        parent_info = service.files().get(fileId=parents[0], fields="name").execute()
+                        file['parent_folder'] = parent_info.get('name', 'Unknown Folder')
+                    except:
+                        file['parent_folder'] = 'Unknown Folder'
+                else:
+                    file['parent_folder'] = 'Root'
+            
             processed_files.append(FileInfo(**file))
         
         return processed_files
-    except:
+    except Exception as e:
+        print(f"Error listing files: {str(e)}")
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
