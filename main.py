@@ -528,7 +528,7 @@ async def connect_personal_drive(drive_id: str = "drive_1", current_user: str = 
                 }
             },
             scopes=[
-                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/drive.file',
                 'https://www.googleapis.com/auth/userinfo.email',
                 'https://www.googleapis.com/auth/userinfo.profile',
                 'openid'
@@ -641,7 +641,7 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                 }
             },
             scopes=[
-                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/drive.file',
                 'https://www.googleapis.com/auth/userinfo.email',
                 'https://www.googleapis.com/auth/userinfo.profile',
                 'openid'
@@ -1101,14 +1101,11 @@ async def list_files(
     if use_personal_drive:
         service = get_user_google_service(current_user, drive_id)
         if not service:
-            print(f"No service available for {current_user} - {drive_id}")
             return []
         if show_all:
             folder_query = "trashed=false"
-            print(f"Personal drive show_all query: {folder_query}")
         else:
             folder_query = "'root' in parents and trashed=false"
-            print(f"Personal drive root query: {folder_query}")
     else:
         service = get_google_service()
         if not service:
@@ -1132,8 +1129,6 @@ async def list_files(
         all_files = []
         page_token = None
         
-        print(f"Starting file listing for {current_user} - {drive_id}")
-        
         while True:
             params = {
                 'q': folder_query,
@@ -1145,14 +1140,11 @@ async def list_files(
                 
             results = service.files().list(**params).execute()
             files = results.get('files', [])
-            print(f"Got {len(files)} files in this batch")
             all_files.extend(files)
             
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
-        
-        print(f"Total files found: {len(all_files)}")
         
         # Build folder path cache for better performance
         folder_cache = {}
@@ -1208,12 +1200,9 @@ async def list_files(
             
             processed_files.append(FileInfo(**file))
         
-        print(f"Returning {len(processed_files)} processed files")
         return processed_files
     except Exception as e:
-        print(f"Error listing files for user {current_user}, personal_drive={use_personal_drive}, show_all={show_all}: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error listing files: {str(e)}")
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
@@ -1389,50 +1378,13 @@ async def delete_file(
     
     try:
         service.files().delete(fileId=file_id).execute()
-        # Update user storage in real-time (only for shared drive)
-        if not use_personal_drive:
-            update_user_storage(current_user)
+        # Update user storage in real-time
+        update_user_storage(current_user)
         return {"message": "File deleted successfully"}
     except Exception as e:
         if "File not found" in str(e) or "404" in str(e):
             return {"message": "File already deleted or not found"}
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
-
-@app.post("/batch-delete")
-async def batch_delete_files(
-    file_ids: List[str],
-    use_personal_drive: bool = False,
-    drive_id: str = "drive_1",
-    current_user: str = Depends(get_current_user)
-):
-    """Delete multiple files in batch"""
-    if use_personal_drive:
-        service = get_user_google_service(current_user, drive_id)
-    else:
-        service = get_google_service()
-    
-    if not service:
-        raise HTTPException(status_code=500, detail="Google Drive not configured")
-    
-    results = []
-    for file_id in file_ids:
-        try:
-            service.files().delete(fileId=file_id).execute()
-            results.append({"file_id": file_id, "success": True})
-        except Exception as e:
-            results.append({"file_id": file_id, "success": False, "error": str(e)})
-    
-    # Update user storage in real-time (only for shared drive)
-    if not use_personal_drive:
-        update_user_storage(current_user)
-    
-    successful_deletes = sum(1 for r in results if r["success"])
-    return {
-        "message": f"Deleted {successful_deletes} of {len(file_ids)} files",
-        "results": results,
-        "total_files": len(file_ids),
-        "successful_deletes": successful_deletes
-    }
 
 
 
