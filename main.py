@@ -1379,13 +1379,50 @@ async def delete_file(
     
     try:
         service.files().delete(fileId=file_id).execute()
-        # Update user storage in real-time
-        update_user_storage(current_user)
+        # Update user storage in real-time (only for shared drive)
+        if not use_personal_drive:
+            update_user_storage(current_user)
         return {"message": "File deleted successfully"}
     except Exception as e:
         if "File not found" in str(e) or "404" in str(e):
             return {"message": "File already deleted or not found"}
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+
+@app.post("/batch-delete")
+async def batch_delete_files(
+    file_ids: List[str],
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: str = Depends(get_current_user)
+):
+    """Delete multiple files in batch"""
+    if use_personal_drive:
+        service = get_user_google_service(current_user, drive_id)
+    else:
+        service = get_google_service()
+    
+    if not service:
+        raise HTTPException(status_code=500, detail="Google Drive not configured")
+    
+    results = []
+    for file_id in file_ids:
+        try:
+            service.files().delete(fileId=file_id).execute()
+            results.append({"file_id": file_id, "success": True})
+        except Exception as e:
+            results.append({"file_id": file_id, "success": False, "error": str(e)})
+    
+    # Update user storage in real-time (only for shared drive)
+    if not use_personal_drive:
+        update_user_storage(current_user)
+    
+    successful_deletes = sum(1 for r in results if r["success"])
+    return {
+        "message": f"Deleted {successful_deletes} of {len(file_ids)} files",
+        "results": results,
+        "total_files": len(file_ids),
+        "successful_deletes": successful_deletes
+    }
 
 
 
