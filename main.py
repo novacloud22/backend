@@ -529,7 +529,8 @@ async def connect_personal_drive(drive_id: str = "drive_1", current_user: str = 
             },
             scopes=[
                 'https://www.googleapis.com/auth/drive.file',
-                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile',
                 'openid'
             ]
         )
@@ -641,7 +642,8 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
             },
             scopes=[
                 'https://www.googleapis.com/auth/drive.file',
-                'https://www.googleapis.com/auth/drive',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile',
                 'openid'
             ]
         )
@@ -1109,18 +1111,16 @@ async def list_files(
         if not service:
             return []
         
-        user_data = get_user_from_firestore(current_user)
-        if not user_data:
-            return []
-        
-        user_folder_id = user_data.get('folder_id')
-        if not user_folder_id:
-            return []
-        
         if show_all:
-            # For shared drive, show all files within user's folder recursively
-            folder_query = f"'{user_folder_id}' in parents and trashed=false"
+            folder_query = "trashed=false"
         else:
+            user_data = get_user_from_firestore(current_user)
+            if not user_data:
+                return []
+            
+            user_folder_id = user_data.get('folder_id')
+            if not user_folder_id:
+                return []
             folder_query = f"'{user_folder_id}' in parents and trashed=false"
     
     try:
@@ -1144,56 +1144,29 @@ async def list_files(
             if not page_token:
                 break
         
-        # Build folder path cache for better performance
-        folder_cache = {}
-        if show_all and use_personal_drive:
-            try:
-                # Get all folders first to build path cache
-                folder_results = service.files().list(
-                    q="mimeType='application/vnd.google-apps.folder' and trashed=false",
-                    fields="files(id,name,parents)",
-                    pageSize=1000
-                ).execute()
-                
-                for folder in folder_results.get('files', []):
-                    folder_cache[folder['id']] = folder.get('name', '')
-            except:
-                pass
-        
         # Process files and add folder paths for show_all mode
         processed_files = []
         for file in all_files:
-            if show_all and use_personal_drive and file.get('parents'):
+            if show_all and file.get('parents'):
                 # Get folder path for better organization
                 try:
                     parent_id = file['parents'][0]
-                    if parent_id != 'root' and parent_id in folder_cache:
-                        file['folder_path'] = folder_cache[parent_id]
-                    elif parent_id != 'root':
-                        try:
-                            parent = service.files().get(fileId=parent_id, fields='name').execute()
-                            file['folder_path'] = parent.get('name', '')
-                            folder_cache[parent_id] = file['folder_path']
-                        except:
-                            file['folder_path'] = 'Unknown Folder'
-                    else:
-                        file['folder_path'] = 'Root'
+                    if parent_id != 'root':
+                        parent = service.files().get(fileId=parent_id, fields='name').execute()
+                        file['folder_path'] = parent.get('name', '')
                 except:
                     file['folder_path'] = ''
             
             if file.get('mimeType') == 'application/vnd.google-apps.folder':
-                # Calculate folder size only for non-show-all mode to improve performance
-                if not show_all:
-                    try:
-                        folder_files = service.files().list(
-                            q=f"'{file['id']}' in parents and trashed=false",
-                            fields="files(size)"
-                        ).execute().get('files', [])
-                        total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
-                        file['size'] = total_size
-                    except:
-                        file['size'] = 0
-                else:
+                # Calculate folder size
+                try:
+                    folder_files = service.files().list(
+                        q=f"'{file['id']}' in parents and trashed=false",
+                        fields="files(size)"
+                    ).execute().get('files', [])
+                    total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
+                    file['size'] = total_size
+                except:
                     file['size'] = 0
             
             processed_files.append(FileInfo(**file))
