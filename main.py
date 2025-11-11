@@ -616,7 +616,7 @@ async def get_personal_drive_status(current_user: str = Depends(get_current_user
 
 @app.get("/oauth2callback")
 async def oauth2callback(code: str, state: Optional[str] = None):
-    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+    frontend_url = os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')
     
     try:
         flow = Flow.from_client_secrets_file(
@@ -670,8 +670,10 @@ async def oauth2callback(code: str, state: Optional[str] = None):
                     print(f"Failed to create service from saved tokens")
                     
                 # Redirect to frontend with success message
+                redirect_url = f"{frontend_url}/dashboard?drive_connected=true&drive_id={drive_id}"
+                print(f"Redirecting to: {redirect_url}")
                 return RedirectResponse(
-                    url=f"{frontend_url}/dashboard?drive_connected=true&drive_id={drive_id}",
+                    url=redirect_url,
                     status_code=302
                 )
             else:
@@ -686,8 +688,10 @@ async def oauth2callback(code: str, state: Optional[str] = None):
                     
                 print(f"Legacy format - Successfully saved tokens for {user_email} - drive_1")
                     
+                redirect_url = f"{frontend_url}/dashboard?drive_connected=true&drive_id=drive_1"
+                print(f"Legacy format - Redirecting to: {redirect_url}")
                 return RedirectResponse(
-                    url=f"{frontend_url}/dashboard?drive_connected=true&drive_id=drive_1",
+                    url=redirect_url,
                     status_code=302
                 )
         else:
@@ -702,8 +706,10 @@ async def oauth2callback(code: str, state: Optional[str] = None):
         print(f"Traceback: {traceback.format_exc()}")
         
         if state and state.startswith('user:'):
+            error_url = f"{frontend_url}/dashboard?error=auth_failed&message={str(e).replace(' ', '%20')}"
+            print(f"Error redirect to: {error_url}")
             return RedirectResponse(
-                url=f"{frontend_url}/dashboard?error=auth_failed&message={str(e)}",
+                url=error_url,
                 status_code=302
             )
         return {"error": f"Authorization failed: {str(e)}"}
