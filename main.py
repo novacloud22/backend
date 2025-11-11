@@ -1095,49 +1095,85 @@ async def get_parallel_data(
 async def list_files(
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
+    show_all: bool = False,
     current_user: str = Depends(get_current_user)
 ):
     if use_personal_drive:
         service = get_user_google_service(current_user, drive_id)
         if not service:
             return []
-        folder_query = "'root' in parents and trashed=false"
+        if show_all:
+            folder_query = "trashed=false"
+        else:
+            folder_query = "'root' in parents and trashed=false"
     else:
         service = get_google_service()
         if not service:
             return []
         
-        user_data = get_user_from_firestore(current_user)
-        if not user_data:
-            return []
-        
-        user_folder_id = user_data.get('folder_id')
-        if not user_folder_id:
-            return []
-        folder_query = f"'{user_folder_id}' in parents and trashed=false"
+        if show_all:
+            folder_query = "trashed=false"
+        else:
+            user_data = get_user_from_firestore(current_user)
+            if not user_data:
+                return []
+            
+            user_folder_id = user_data.get('folder_id')
+            if not user_folder_id:
+                return []
+            folder_query = f"'{user_folder_id}' in parents and trashed=false"
     
     try:
-        results = service.files().list(
-            q=folder_query,
-            fields="files(id,name,size,mimeType,createdTime,webViewLink,webContentLink)"
-        ).execute()
-        files = results.get('files', [])
+        all_files = []
+        page_token = None
         
-        # Process files and calculate folder sizes
+        while True:
+            params = {
+                'q': folder_query,
+                'fields': "nextPageToken,files(id,name,size,mimeType,createdTime,webViewLink,webContentLink,parents)",
+                'pageSize': 1000
+            }
+            if page_token:
+                params['pageToken'] = page_token
+                
+            results = service.files().list(**params).execute()
+            files = results.get('files', [])
+            all_files.extend(files)
+            
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+        
+        # Process files and add folder paths for show_all mode
         processed_files = []
-        for file in files:
+        for file in all_files:
+            if show_all and file.get('parents'):
+                # Get folder path for better organization
+                try:
+                    parent_id = file['parents'][0]
+                    if parent_id != 'root':
+                        parent = service.files().get(fileId=parent_id, fields='name').execute()
+                        file['folder_path'] = parent.get('name', '')
+                except:
+                    file['folder_path'] = ''
+            
             if file.get('mimeType') == 'application/vnd.google-apps.folder':
                 # Calculate folder size
-                folder_files = service.files().list(
-                    q=f"'{file['id']}' in parents and trashed=false",
-                    fields="files(size)"
-                ).execute().get('files', [])
-                total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
-                file['size'] = total_size
+                try:
+                    folder_files = service.files().list(
+                        q=f"'{file['id']}' in parents and trashed=false",
+                        fields="files(size)"
+                    ).execute().get('files', [])
+                    total_size = sum(int(f.get('size', 0)) for f in folder_files if f.get('size'))
+                    file['size'] = total_size
+                except:
+                    file['size'] = 0
+            
             processed_files.append(FileInfo(**file))
         
         return processed_files
-    except:
+    except Exception as e:
+        print(f"Error listing files: {str(e)}")
         return []
 
 @app.get("/folder/{folder_id}/contents", response_model=List[FileInfo])
@@ -1195,7 +1231,8 @@ def get_optional_current_user(credentials: HTTPAuthorizationCredentials = Depend
     try:
         decoded_token = auth.verify_id_token(credentials.credentials)
         return decoded_token.get('email')
-    except:
+    except Exception as e:
+        print(f"Optional auth error: {str(e)}")
         return None
 
 @app.get("/preview/{file_id}")
@@ -1205,18 +1242,23 @@ async def preview_file(
     drive_id: str = "drive_1",
     current_user: Optional[str] = Depends(get_optional_current_user)
 ):
-    if use_personal_drive and current_user:
-        service = get_user_google_service(current_user, drive_id)
-    else:
-        service = get_google_service()
-    
-    if not service:
-        raise HTTPException(status_code=500, detail="Google Drive not configured")
-    
     try:
-        file_metadata = service.files().get(fileId=file_id).execute()
-        request = service.files().get_media(fileId=file_id)
+        if use_personal_drive:
+            if not current_user:
+                raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
+            service = get_user_google_service(current_user, drive_id)
+            if not service:
+                raise HTTPException(status_code=400, detail=f"Personal Google Drive {drive_id} not connected")
+        else:
+            service = get_google_service()
+            if not service:
+                raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
         
+        # Get file metadata first
+        file_metadata = service.files().get(fileId=file_id).execute()
+        
+        # Download file content
+        request = service.files().get_media(fileId=file_id)
         file_io = io.BytesIO()
         downloader = MediaIoBaseDownload(file_io, request)
         
@@ -1226,13 +1268,19 @@ async def preview_file(
         
         file_io.seek(0)
         
-        # For CSV files, return as plain text with inline disposition
+        # Determine MIME type and headers
         mime_type = file_metadata.get('mimeType', 'application/octet-stream')
         file_name = file_metadata.get('name', '').lower()
-        headers = {}
+        headers = {'Access-Control-Allow-Origin': '*'}
         
+        # Handle specific file types
         if mime_type == 'text/csv' or file_name.endswith('.csv'):
             mime_type = 'text/plain'
+            headers['Content-Disposition'] = 'inline'
+        elif file_name.endswith(('.py', '.js', '.css', '.html', '.txt', '.md')):
+            mime_type = 'text/plain'
+            headers['Content-Disposition'] = 'inline'
+        elif mime_type.startswith('image/'):
             headers['Content-Disposition'] = 'inline'
         
         return StreamingResponse(
@@ -1240,7 +1288,17 @@ async def preview_file(
             media_type=mime_type,
             headers=headers
         )
+        
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        else:
+            print(f"Google Drive API error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Google Drive error: {e.resp.status}")
     except Exception as e:
+        print(f"Preview error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
 @app.get("/download/{file_id}")
