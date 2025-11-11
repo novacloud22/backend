@@ -689,13 +689,31 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                 else:
                     print(f"Failed to create service from saved tokens")
                     
-                # Redirect to frontend with success message
-                redirect_url = f"{frontend_url}/dashboard?drive_connected=true&drive_id={drive_id}"
-                print(f"Redirecting to: {redirect_url}")
-                return RedirectResponse(
-                    url=redirect_url,
-                    status_code=302
-                )
+                # For popup windows, return a simple HTML page that closes the popup
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Authorization Complete</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                        .success {{ color: #28a745; }}
+                    </style>
+                </head>
+                <body>
+                    <h2 class="success">✅ Google Drive Connected Successfully!</h2>
+                    <p>Drive {drive_id} has been connected to your account.</p>
+                    <p>This window will close automatically...</p>
+                    <script>
+                        setTimeout(() => {{
+                            window.close();
+                        }}, 2000);
+                    </script>
+                </body>
+                </html>
+                """
+                from fastapi.responses import HTMLResponse
+                return HTMLResponse(content=html_content)
             else:
                 # Legacy format support
                 user_email = state.replace('user:', '').split(':')[0]
@@ -708,12 +726,31 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                     
                 print(f"Legacy format - Successfully saved tokens for {user_email} - drive_1")
                     
-                redirect_url = f"{frontend_url}/dashboard?drive_connected=true&drive_id=drive_1"
-                print(f"Legacy format - Redirecting to: {redirect_url}")
-                return RedirectResponse(
-                    url=redirect_url,
-                    status_code=302
-                )
+                # For popup windows, return a simple HTML page that closes the popup
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Authorization Complete</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                        .success {{ color: #28a745; }}
+                    </style>
+                </head>
+                <body>
+                    <h2 class="success">✅ Google Drive Connected Successfully!</h2>
+                    <p>Drive 1 has been connected to your account.</p>
+                    <p>This window will close automatically...</p>
+                    <script>
+                        setTimeout(() => {{
+                            window.close();
+                        }}, 2000);
+                    </script>
+                </body>
+                </html>
+                """
+                from fastapi.responses import HTMLResponse
+                return HTMLResponse(content=html_content)
         else:
             # Save shared tokens for admin setup
             save_json_file('shared_tokens.json', json.loads(credentials.to_json()))
@@ -723,15 +760,32 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
         print(f"OAuth callback error: {str(e)}")
         
         if state and state.startswith('user:'):
-            if 'invalid_grant' in str(e).lower():
-                error_url = f"{frontend_url}/dashboard?error=oauth_expired&message=Please%20try%20connecting%20again"
-            else:
-                error_url = f"{frontend_url}/dashboard?error=auth_failed&message={str(e).replace(' ', '%20')}"
-            print(f"Error redirect to: {error_url}")
-            return RedirectResponse(
-                url=error_url,
-                status_code=302
-            )
+            # For popup windows, return error HTML page
+            error_message = "Connection expired. Please try again." if 'invalid_grant' in str(e).lower() else str(e)
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authorization Error</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                    .error {{ color: #dc3545; }}
+                </style>
+            </head>
+            <body>
+                <h2 class="error">❌ Authorization Failed</h2>
+                <p>{error_message}</p>
+                <p>This window will close automatically...</p>
+                <script>
+                    setTimeout(() => {{
+                        window.close();
+                    }}, 3000);
+                </script>
+            </body>
+            </html>
+            """
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(content=html_content)
         return {"error": f"Authorization failed: {str(e)}"}
 
 @app.post("/create-folder")
