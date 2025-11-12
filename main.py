@@ -2462,7 +2462,7 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
             'file_id': request.file_id, 'file_name': request.file_name, 'owner_email': current_user,
             'allow_download': request.allow_download, 'allow_preview': request.allow_preview,
             'expires_at': expires_at.isoformat() if expires_at else None, 'access_count': 0,
-            'use_personal_drive': request.use_personal_drive, 'drive_id': request.drive_id
+            'created_at': datetime.utcnow().isoformat(), 'use_personal_drive': request.use_personal_drive, 'drive_id': request.drive_id
         })
     return {"share_url": f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/share/{share_token}"}
 
