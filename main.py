@@ -1910,7 +1910,7 @@ async def request_email_change(
 We received a request to change your email address from {current_user} to {new_email}.
 
 If you made this request, please verify your new email address by clicking the link below:
-{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/verify-email-change?token={verification_token}
+{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/verify-email-change?token={verification_token}
 
 If you did not request this change, please secure your account immediately by:
 1. Changing your password
@@ -2461,9 +2461,10 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
         db.collection('share_links').document(share_token).set({
             'file_id': request.file_id, 'file_name': request.file_name, 'owner_email': current_user,
             'allow_download': request.allow_download, 'allow_preview': request.allow_preview,
-            'expires_at': expires_at.isoformat() if expires_at else None, 'access_count': 0
+            'expires_at': expires_at.isoformat() if expires_at else None, 'access_count': 0,
+            'use_personal_drive': request.use_personal_drive, 'drive_id': request.drive_id
         })
-    return {"share_url": f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/share/{share_token}"}
+    return {"share_url": f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/share/{share_token}"}
 
 @app.get("/share/{share_token}")
 async def access_shared_file(share_token: str):
@@ -2487,7 +2488,12 @@ async def preview_shared_file(share_token: str):
         raise HTTPException(status_code=410, detail="Share link expired")
     if not data['allow_preview']: raise HTTPException(status_code=403, detail="Preview not allowed")
     
-    service = get_google_service()
+    # Get appropriate service based on drive type
+    if data.get('use_personal_drive', False):
+        service = get_user_google_service(data['owner_email'], data.get('drive_id', 'drive_1'))
+    else:
+        service = get_google_service()
+    
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
     file_metadata = service.files().get(fileId=data['file_id'], fields='id,name,mimeType,size').execute()
@@ -2509,7 +2515,12 @@ async def download_shared_file(share_token: str):
         raise HTTPException(status_code=410, detail="Share link expired")
     if not data['allow_download']: raise HTTPException(status_code=403, detail="Download not allowed")
     
-    service = get_google_service()
+    # Get appropriate service based on drive type
+    if data.get('use_personal_drive', False):
+        service = get_user_google_service(data['owner_email'], data.get('drive_id', 'drive_1'))
+    else:
+        service = get_google_service()
+    
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
     file_metadata = service.files().get(fileId=data['file_id'], fields='id,name').execute()
@@ -2520,3 +2531,155 @@ async def download_shared_file(share_token: str):
     while not done: status, done = downloader.next_chunk()
     file_io.seek(0)
     return StreamingResponse(io.BytesIO(file_io.read()), media_type='application/octet-stream', headers={"Content-Disposition": f'attachment; filename="{file_metadata["name"]}"'})
+
+@app.get("/share/my-links")
+async def get_user_shared_links(current_user: str = Depends(get_current_user)):
+    """Get all shared links created by the current user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        links_ref = db.collection('share_links')
+        query = links_ref.where('owner_email', '==', current_user)
+        docs = list(query.stream())
+        
+        links = []
+        for doc in docs:
+            link_data = doc.to_dict()
+            link_data['share_token'] = doc.id
+            link_data['share_url'] = f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/share/{doc.id}"
+            links.append(link_data)
+        
+        links.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return {"links": links}
+    except Exception as e:
+        print(f"Error fetching user shared links: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch shared links")
+
+@app.get("/share/analytics")
+async def get_share_analytics(current_user: str = Depends(get_current_user)):
+    """Get sharing analytics for current user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        # Get all share links created by current user
+        shares_ref = db.collection('share_links')
+        query = shares_ref.where('owner_email', '==', current_user)
+        docs = list(query.stream())
+        
+        total_shares = len(docs)
+        total_access_count = 0
+        active_shares = 0
+        expired_shares = 0
+        personal_drive_shares = 0
+        shared_drive_shares = 0
+        
+        current_time = datetime.utcnow()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            total_access_count += data.get('access_count', 0)
+            
+            # Check if expired
+            if data.get('expires_at'):
+                expires_at = datetime.fromisoformat(data['expires_at'])
+                if current_time > expires_at:
+                    expired_shares += 1
+                else:
+                    active_shares += 1
+            else:
+                active_shares += 1
+            
+            # Count drive types
+            if data.get('use_personal_drive', False):
+                personal_drive_shares += 1
+            else:
+                shared_drive_shares += 1
+        
+        return {
+            "total_shares": total_shares,
+            "active_shares": active_shares,
+            "expired_shares": expired_shares,
+            "total_access_count": total_access_count,
+            "personal_drive_shares": personal_drive_shares,
+            "shared_drive_shares": shared_drive_shares
+        }
+        
+    except Exception as e:
+        print(f"Error getting share analytics: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get analytics")
+
+@app.get("/share/list")
+async def list_user_shares(current_user: str = Depends(get_current_user)):
+    """List all share links created by current user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        shares_ref = db.collection('share_links')
+        query = shares_ref.where('owner_email', '==', current_user)
+        docs = list(query.stream())
+        
+        shares = []
+        current_time = datetime.utcnow()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            share_token = doc.id
+            
+            # Check if expired
+            is_expired = False
+            if data.get('expires_at'):
+                expires_at = datetime.fromisoformat(data['expires_at'])
+                is_expired = current_time > expires_at
+            
+            shares.append({
+                "token": share_token,
+                "file_name": data.get('file_name'),
+                "file_id": data.get('file_id'),
+                "created_at": data.get('created_at'),
+                "expires_at": data.get('expires_at'),
+                "is_expired": is_expired,
+                "access_count": data.get('access_count', 0),
+                "allow_download": data.get('allow_download', True),
+                "allow_preview": data.get('allow_preview', True),
+                "use_personal_drive": data.get('use_personal_drive', False),
+                "drive_id": data.get('drive_id', 'drive_1'),
+                "share_url": f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/share/{share_token}"
+            })
+        
+        # Sort by creation date (newest first)
+        shares.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return {"shares": shares}
+        
+    except Exception as e:
+        print(f"Error listing shares: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list shares")
+
+@app.delete("/share/{share_token}")
+async def delete_share_link(share_token: str, current_user: str = Depends(get_current_user)):
+    """Delete a share link"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        doc_ref = db.collection('share_links').document(share_token)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Share link not found")
+        
+        data = doc.to_dict()
+        if data.get('owner_email') != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this share link")
+        
+        doc_ref.delete()
+        return {"message": "Share link deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting share link: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete share link")
