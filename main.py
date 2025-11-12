@@ -1079,10 +1079,13 @@ async def get_direct_urls(
     file_ids: List[str],
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    current_user: str = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Get direct Google Drive URLs for multiple files"""
-    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
+    
+    service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
         raise HTTPException(status_code=400, detail="Google Drive service not available")
     
@@ -1100,10 +1103,13 @@ async def stream_file(
     file_id: str,
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    current_user: str = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Stream file directly from Google Drive without downloading to server"""
-    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
+    
+    service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
         raise HTTPException(status_code=400, detail="Google Drive service not available")
     
@@ -1140,10 +1146,13 @@ async def setup_batch_streaming(
     file_ids: List[str],
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    current_user: str = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Setup streaming for multiple files"""
-    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
+    
+    service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
         raise HTTPException(status_code=400, detail="Google Drive service not available")
     
@@ -2281,24 +2290,45 @@ async def debug_share_link(share_token: str):
             "expires_at": data.get('expires_at'),
             "current_time_utc": current_time.isoformat(),
             "access_count": data.get('access_count', 0),
+            "view_limit": data.get('view_limit'),
             "allow_download": data.get('allow_download'),
             "allow_preview": data.get('allow_preview'),
             "use_personal_drive": data.get('use_personal_drive'),
             "drive_id": data.get('drive_id')
         }
         
+        # Check time expiry
+        time_expired = False
         if data.get('expires_at'):
             try:
                 expires_at = datetime.fromisoformat(data['expires_at'])
                 debug_info["expires_at_parsed"] = expires_at.isoformat()
-                debug_info["is_expired"] = current_time >= expires_at
+                time_expired = current_time >= expires_at
                 debug_info["time_until_expiry"] = str(expires_at - current_time) if expires_at > current_time else "Already expired"
             except ValueError as e:
                 debug_info["expires_at_error"] = str(e)
-                debug_info["is_expired"] = True
+                time_expired = True
         else:
-            debug_info["is_expired"] = False
             debug_info["time_until_expiry"] = "Never expires"
+        
+        # Check view limit expiry
+        view_limit_expired = False
+        view_limit = data.get('view_limit')
+        if view_limit is not None:
+            access_count = data.get('access_count', 0)
+            view_limit_expired = access_count >= view_limit
+            debug_info["views_remaining"] = max(0, view_limit - access_count)
+            debug_info["view_limit_reached"] = view_limit_expired
+        else:
+            debug_info["views_remaining"] = "Unlimited"
+            debug_info["view_limit_reached"] = False
+        
+        debug_info["is_expired"] = time_expired or view_limit_expired
+        debug_info["expiry_reason"] = []
+        if time_expired:
+            debug_info["expiry_reason"].append("time")
+        if view_limit_expired:
+            debug_info["expiry_reason"].append("view_limit")
         
         return debug_info
         
@@ -2585,6 +2615,7 @@ class ShareLinkRequest(BaseModel):
     allow_preview: bool = True
     use_personal_drive: bool = False
     drive_id: str = "drive_1"
+    view_limit: Optional[int] = None  # None means unlimited views
 
 
 
@@ -2608,6 +2639,7 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
             'allow_preview': request.allow_preview,
             'expires_at': expires_at.isoformat() if expires_at else None,
             'access_count': 0,
+            'view_limit': request.view_limit,
             'created_at': datetime.utcnow().isoformat(),
             'use_personal_drive': request.use_personal_drive,
             'drive_id': request.drive_id
@@ -2712,11 +2744,17 @@ async def list_user_shares(current_user: str = Depends(get_current_user)):
             data = doc.to_dict()
             share_token = doc.id
             
-            # Check if expired
+            # Check if expired by time
             is_expired = False
             if data.get('expires_at'):
                 expires_at = datetime.fromisoformat(data['expires_at'])
                 is_expired = current_time > expires_at
+            
+            # Check if expired by view limit
+            view_limit_expired = False
+            view_limit = data.get('view_limit')
+            if view_limit is not None:
+                view_limit_expired = data.get('access_count', 0) >= view_limit
             
             shares.append({
                 "token": share_token,
@@ -2724,8 +2762,9 @@ async def list_user_shares(current_user: str = Depends(get_current_user)):
                 "file_id": data.get('file_id'),
                 "created_at": data.get('created_at'),
                 "expires_at": data.get('expires_at'),
-                "is_expired": is_expired,
+                "is_expired": is_expired or view_limit_expired,
                 "access_count": data.get('access_count', 0),
+                "view_limit": view_limit,
                 "allow_download": data.get('allow_download', True),
                 "allow_preview": data.get('allow_preview', True),
                 "use_personal_drive": data.get('use_personal_drive', False),
@@ -2749,7 +2788,7 @@ async def access_shared_file(share_token: str):
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
     
-    # Check if link is expired
+    # Check if link is expired by time
     if data.get('expires_at'):
         try:
             expires_at = datetime.fromisoformat(data['expires_at'])
@@ -2759,14 +2798,22 @@ async def access_shared_file(share_token: str):
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
     
+    # Check if view limit is reached
+    current_views = data.get('access_count', 0)
+    view_limit = data.get('view_limit')
+    if view_limit is not None and current_views >= view_limit:
+        raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
+    
     # Update access count
-    doc.reference.update({'access_count': data.get('access_count', 0) + 1})
+    doc.reference.update({'access_count': current_views + 1})
     
     return {
         'file_id': data['file_id'], 
         'file_name': data['file_name'], 
         'allow_download': data['allow_download'], 
-        'allow_preview': data['allow_preview']
+        'allow_preview': data['allow_preview'],
+        'view_limit': view_limit,
+        'views_remaining': view_limit - (current_views + 1) if view_limit else None
     }
 
 @app.get("/share/{share_token}/preview")
@@ -2776,7 +2823,7 @@ async def preview_shared_file(share_token: str):
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
     
-    # Check if link is expired
+    # Check if link is expired by time
     if data.get('expires_at'):
         try:
             expires_at = datetime.fromisoformat(data['expires_at'])
@@ -2785,6 +2832,12 @@ async def preview_shared_file(share_token: str):
                 raise HTTPException(status_code=410, detail="Share link expired")
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if view limit is reached
+    current_views = data.get('access_count', 0)
+    view_limit = data.get('view_limit')
+    if view_limit is not None and current_views >= view_limit:
+        raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
     
     if not data['allow_preview']: raise HTTPException(status_code=403, detail="Preview not allowed")
     
@@ -2812,7 +2865,7 @@ async def download_shared_file(share_token: str):
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
     
-    # Check if link is expired
+    # Check if link is expired by time
     if data.get('expires_at'):
         try:
             expires_at = datetime.fromisoformat(data['expires_at'])
@@ -2821,6 +2874,12 @@ async def download_shared_file(share_token: str):
                 raise HTTPException(status_code=410, detail="Share link expired")
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if view limit is reached
+    current_views = data.get('access_count', 0)
+    view_limit = data.get('view_limit')
+    if view_limit is not None and current_views >= view_limit:
+        raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
     
     if not data['allow_download']: raise HTTPException(status_code=403, detail="Download not allowed")
     
