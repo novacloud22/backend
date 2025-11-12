@@ -1068,6 +1068,94 @@ async def batch_operations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch operation failed: {str(e)}")
 
+def get_drive_service(current_user: str, use_personal_drive: bool = False, drive_id: str = "drive_1"):
+    """Unified service getter for both shared and personal drives"""
+    if use_personal_drive:
+        return get_user_google_service(current_user, drive_id)
+    return get_google_service()
+
+@app.post("/direct-urls")
+async def get_direct_urls(
+    file_ids: List[str],
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: str = Depends(get_current_user)
+):
+    """Get direct Google Drive URLs for multiple files"""
+    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if not service:
+        raise HTTPException(status_code=400, detail="Google Drive service not available")
+    
+    from parallel_api import get_direct_download_urls
+    results = await get_direct_download_urls(file_ids, service)
+    
+    return {
+        "success": True,
+        "direct_urls": results,
+        "total_files": len(file_ids)
+    }
+
+@app.get("/stream/{file_id}")
+async def stream_file(
+    file_id: str,
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: str = Depends(get_current_user)
+):
+    """Stream file directly from Google Drive without downloading to server"""
+    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if not service:
+        raise HTTPException(status_code=400, detail="Google Drive service not available")
+    
+    file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+    
+    def generate_stream():
+        request = service.files().get_media(fileId=file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                file_io.seek(0)
+                chunk = file_io.read()
+                if chunk:
+                    yield chunk
+                file_io.seek(0)
+                file_io.truncate(0)
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type=file_metadata.get('mimeType', 'application/octet-stream'),
+        headers={
+            'Content-Disposition': f'inline; filename="{file_metadata["name"]}"',
+            'Cache-Control': 'public, max-age=3600',
+            'Accept-Ranges': 'bytes'
+        }
+    )
+
+@app.post("/batch-stream-setup")
+async def setup_batch_streaming(
+    file_ids: List[str],
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: str = Depends(get_current_user)
+):
+    """Setup streaming for multiple files"""
+    service = get_drive_service(current_user, use_personal_drive, drive_id)
+    if not service:
+        raise HTTPException(status_code=400, detail="Google Drive service not available")
+    
+    from parallel_api import setup_streaming_downloads
+    results = await setup_streaming_downloads(file_ids, service)
+    
+    return {
+        "success": True,
+        "stream_setups": results,
+        "total_files": len(file_ids)
+    }
+
 @app.get("/parallel-data")
 async def get_parallel_data(
     use_personal_drive: bool = False,
@@ -1287,30 +1375,33 @@ async def preview_file(
     current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     try:
-        if use_personal_drive:
-            if not current_user:
-                raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
-            service = get_user_google_service(current_user, drive_id)
-            if not service:
-                raise HTTPException(status_code=400, detail=f"Personal Google Drive {drive_id} not connected")
-        else:
-            service = get_google_service()
-            if not service:
-                raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
+        if use_personal_drive and not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
+        
+        service = get_drive_service(current_user or '', use_personal_drive, drive_id)
+        if not service:
+            drive_type = "Personal" if use_personal_drive else "Shared"
+            raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
         
         # Get file metadata first
         file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
         
-        # Download file content
-        request = service.files().get_media(fileId=file_id)
-        file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request)
-        
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
-        file_io.seek(0)
+        # Stream file content directly without downloading to server
+        def generate_stream():
+            request = service.files().get_media(fileId=file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
         
         # Determine MIME type and headers
         mime_type = file_metadata.get('mimeType', 'application/octet-stream')
@@ -1318,20 +1409,15 @@ async def preview_file(
         headers = {
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=3600',
-            'Content-Length': str(len(file_io.getvalue())),
             'Content-Disposition': 'inline'  # Default to inline for preview
         }
         
         # Enhanced file type handling
         if mime_type == 'text/csv' or file_name.endswith('.csv'):
             mime_type = 'text/plain; charset=utf-8'
-            headers['Content-Disposition'] = 'inline'
         elif file_name.endswith(('.py', '.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.htm', '.txt', '.md', '.json', '.xml', '.yaml', '.yml', '.sql', '.php', '.rb', '.go', '.rs', '.kt', '.swift', '.dart', '.sh', '.bat', '.ps1')):
             mime_type = 'text/plain; charset=utf-8'
-            headers['Content-Disposition'] = 'inline'
         elif mime_type.startswith('image/') or file_name.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif')):
-            headers['Content-Disposition'] = 'inline'
-            # Keep original image MIME type for proper browser handling
             if file_name.endswith('.svg'):
                 mime_type = 'image/svg+xml'
             elif file_name.endswith(('.jpg', '.jpeg')):
@@ -1343,17 +1429,14 @@ async def preview_file(
             elif file_name.endswith('.webp'):
                 mime_type = 'image/webp'
         elif mime_type.startswith('video/') or file_name.endswith(('.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp')):
-            headers['Content-Disposition'] = 'inline'
             headers['Accept-Ranges'] = 'bytes'
         elif mime_type.startswith('audio/') or file_name.endswith(('.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma')):
-            headers['Content-Disposition'] = 'inline'
             headers['Accept-Ranges'] = 'bytes'
         elif 'pdf' in mime_type or file_name.endswith('.pdf'):
             mime_type = 'application/pdf'
-            headers['Content-Disposition'] = 'inline'
         
         return StreamingResponse(
-            io.BytesIO(file_io.read()),
+            generate_stream(),
             media_type=mime_type,
             headers=headers
         )
@@ -1380,26 +1463,29 @@ async def download_file(
     current_user: str = Depends(get_current_user)
 ):
     try:
-        if use_personal_drive:
-            service = get_user_google_service(current_user, drive_id)
-            if not service:
-                raise HTTPException(status_code=400, detail=f"Personal Google Drive {drive_id} not connected")
-        else:
-            service = get_google_service()
-            if not service:
-                raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
+        service = get_drive_service(current_user, use_personal_drive, drive_id)
+        if not service:
+            drive_type = "Personal" if use_personal_drive else "Shared"
+            raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
         
         file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
-        request = service.files().get_media(fileId=file_id)
         
-        file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request)
-        
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
-        file_io.seek(0)
+        # Stream file content directly without downloading to server
+        def generate_stream():
+            request = service.files().get_media(fileId=file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
         
         filename = file_metadata['name']
         # Sanitize filename for download
@@ -1407,12 +1493,12 @@ async def download_file(
         
         headers = {
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
-            "Content-Length": str(len(file_io.getvalue())),
-            "Cache-Control": "no-cache"
+            "Cache-Control": "no-cache",
+            "Accept-Ranges": "bytes"
         }
         
         return StreamingResponse(
-            io.BytesIO(file_io.read()),
+            generate_stream(),
             media_type='application/octet-stream',
             headers=headers
         )
@@ -2173,6 +2259,52 @@ async def test_personal_drive(current_user: str = Depends(get_current_user), dri
             "error": str(e)
         }
 
+@app.get("/debug/share/{share_token}")
+async def debug_share_link(share_token: str):
+    """Debug endpoint to check share link status"""
+    if not db:
+        return {"error": "Database not available"}
+    
+    try:
+        doc = db.collection('share_links').document(share_token).get()
+        if not doc.exists:
+            return {"error": "Share link not found"}
+        
+        data = doc.to_dict()
+        current_time = datetime.utcnow()
+        
+        debug_info = {
+            "share_token": share_token,
+            "file_name": data.get('file_name'),
+            "owner_email": data.get('owner_email'),
+            "created_at": data.get('created_at'),
+            "expires_at": data.get('expires_at'),
+            "current_time_utc": current_time.isoformat(),
+            "access_count": data.get('access_count', 0),
+            "allow_download": data.get('allow_download'),
+            "allow_preview": data.get('allow_preview'),
+            "use_personal_drive": data.get('use_personal_drive'),
+            "drive_id": data.get('drive_id')
+        }
+        
+        if data.get('expires_at'):
+            try:
+                expires_at = datetime.fromisoformat(data['expires_at'])
+                debug_info["expires_at_parsed"] = expires_at.isoformat()
+                debug_info["is_expired"] = current_time >= expires_at
+                debug_info["time_until_expiry"] = str(expires_at - current_time) if expires_at > current_time else "Already expired"
+            except ValueError as e:
+                debug_info["expires_at_error"] = str(e)
+                debug_info["is_expired"] = True
+        else:
+            debug_info["is_expired"] = False
+            debug_info["time_until_expiry"] = "Never expires"
+        
+        return debug_info
+        
+    except Exception as e:
+        return {"error": str(e)}
+
 
 
 if __name__ == "__main__":
@@ -2461,14 +2593,27 @@ class ShareLinkRequest(BaseModel):
 @app.post("/share/generate-link")
 async def generate_share_link(request: ShareLinkRequest, current_user: str = Depends(get_current_user)):
     share_token = secrets.token_urlsafe(16)
-    expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours) if request.expiry_hours else None
+    
+    # Calculate expiry time properly
+    expires_at = None
+    if request.expiry_hours and request.expiry_hours > 0:
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
+    
     if db:
-        db.collection('share_links').document(share_token).set({
-            'file_id': request.file_id, 'file_name': request.file_name, 'owner_email': current_user,
-            'allow_download': request.allow_download, 'allow_preview': request.allow_preview,
-            'expires_at': expires_at.isoformat() if expires_at else None, 'access_count': 0,
-            'created_at': datetime.utcnow().isoformat(), 'use_personal_drive': request.use_personal_drive, 'drive_id': request.drive_id
-        })
+        share_data = {
+            'file_id': request.file_id,
+            'file_name': request.file_name,
+            'owner_email': current_user,
+            'allow_download': request.allow_download,
+            'allow_preview': request.allow_preview,
+            'expires_at': expires_at.isoformat() if expires_at else None,
+            'access_count': 0,
+            'created_at': datetime.utcnow().isoformat(),
+            'use_personal_drive': request.use_personal_drive,
+            'drive_id': request.drive_id
+        }
+        db.collection('share_links').document(share_token).set(share_data)
+    
     return {"share_url": f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/share/{share_token}"}
 
 @app.get("/share/my-links")
@@ -2603,11 +2748,26 @@ async def access_shared_file(share_token: str):
     doc = db.collection('share_links').document(share_token).get()
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
-    if data.get('expires_at') and datetime.utcnow() > datetime.fromisoformat(data['expires_at']):
-        doc.reference.delete()
-        raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if link is expired
+    if data.get('expires_at'):
+        try:
+            expires_at = datetime.fromisoformat(data['expires_at'])
+            current_time = datetime.utcnow()
+            if current_time >= expires_at:
+                raise HTTPException(status_code=410, detail="Share link expired")
+        except ValueError:
+            raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Update access count
     doc.reference.update({'access_count': data.get('access_count', 0) + 1})
-    return {'file_id': data['file_id'], 'file_name': data['file_name'], 'allow_download': data['allow_download'], 'allow_preview': data['allow_preview']}
+    
+    return {
+        'file_id': data['file_id'], 
+        'file_name': data['file_name'], 
+        'allow_download': data['allow_download'], 
+        'allow_preview': data['allow_preview']
+    }
 
 @app.get("/share/{share_token}/preview")
 async def preview_shared_file(share_token: str):
@@ -2615,8 +2775,17 @@ async def preview_shared_file(share_token: str):
     doc = db.collection('share_links').document(share_token).get()
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
-    if data.get('expires_at') and datetime.utcnow() > datetime.fromisoformat(data['expires_at']):
-        raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if link is expired
+    if data.get('expires_at'):
+        try:
+            expires_at = datetime.fromisoformat(data['expires_at'])
+            current_time = datetime.utcnow()
+            if current_time >= expires_at:
+                raise HTTPException(status_code=410, detail="Share link expired")
+        except ValueError:
+            raise HTTPException(status_code=410, detail="Share link expired")
+    
     if not data['allow_preview']: raise HTTPException(status_code=403, detail="Preview not allowed")
     
     # Get appropriate service based on drive type
@@ -2642,8 +2811,17 @@ async def download_shared_file(share_token: str):
     doc = db.collection('share_links').document(share_token).get()
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
-    if data.get('expires_at') and datetime.utcnow() > datetime.fromisoformat(data['expires_at']):
-        raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if link is expired
+    if data.get('expires_at'):
+        try:
+            expires_at = datetime.fromisoformat(data['expires_at'])
+            current_time = datetime.utcnow()
+            if current_time >= expires_at:
+                raise HTTPException(status_code=410, detail="Share link expired")
+        except ValueError:
+            raise HTTPException(status_code=410, detail="Share link expired")
+    
     if not data['allow_download']: raise HTTPException(status_code=403, detail="Download not allowed")
     
     # Get appropriate service based on drive type
