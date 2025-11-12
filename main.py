@@ -2860,13 +2860,28 @@ async def preview_shared_file(share_token: str):
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
     file_metadata = service.files().get(fileId=data['file_id'], fields='id,name,mimeType,size').execute()
-    request = service.files().get_media(fileId=data['file_id'])
-    file_io = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_io, request)
-    done = False
-    while not done: status, done = downloader.next_chunk()
-    file_io.seek(0)
-    return StreamingResponse(io.BytesIO(file_io.read()), media_type=file_metadata.get('mimeType', 'application/octet-stream'), headers={'Content-Disposition': 'inline'})
+    
+    def generate_stream():
+        request = service.files().get_media(fileId=data['file_id'])
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                file_io.seek(0)
+                chunk = file_io.read()
+                if chunk:
+                    yield chunk
+                file_io.seek(0)
+                file_io.truncate(0)
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type=file_metadata.get('mimeType', 'application/octet-stream'),
+        headers={'Content-Disposition': 'inline'}
+    )
 
 @app.get("/share/{share_token}/download")
 async def download_shared_file(share_token: str):
@@ -2902,13 +2917,31 @@ async def download_shared_file(share_token: str):
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
     file_metadata = service.files().get(fileId=data['file_id'], fields='id,name').execute()
-    request = service.files().get_media(fileId=data['file_id'])
-    file_io = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_io, request)
-    done = False
-    while not done: status, done = downloader.next_chunk()
-    file_io.seek(0)
-    return StreamingResponse(io.BytesIO(file_io.read()), media_type='application/octet-stream', headers={"Content-Disposition": f'attachment; filename="{file_metadata["name"]}"'})
+    
+    def generate_stream():
+        request = service.files().get_media(fileId=data['file_id'])
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                file_io.seek(0)
+                chunk = file_io.read()
+                if chunk:
+                    yield chunk
+                file_io.seek(0)
+                file_io.truncate(0)
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type='application/octet-stream',
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_metadata["name"]}"',
+            "Accept-Ranges": "bytes"
+        }
+    )
 
 @app.post("/share/{share_token}/expire")
 async def expire_shared_link(share_token: str, current_user: str = Depends(get_current_user)):
