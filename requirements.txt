@@ -15,4 +15,4 @@ qrcode[pil]
 base32-crockford
 aiofiles
 aiohttp
-concurrent-futures
+
