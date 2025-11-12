@@ -176,6 +176,16 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         print(f"Auth Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
+def get_optional_current_user(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False))):
+    if not credentials:
+        return None
+    try:
+        decoded_token = auth.verify_id_token(credentials.credentials)
+        return decoded_token.get('email')
+    except Exception as e:
+        print(f"Optional auth error: {str(e)}")
+        return None
+
 
 
 def get_google_service():
