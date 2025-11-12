@@ -2814,20 +2814,52 @@ async def access_shared_file(share_token: str):
     if view_limit is not None and current_views >= view_limit:
         raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
     
+    # Get appropriate service to check if it's a folder
+    if data.get('use_personal_drive', False):
+        service = get_user_google_service(data['owner_email'], data.get('drive_id', 'drive_1'))
+    else:
+        service = get_google_service()
+    
+    folder_contents = None
+    is_folder = False
+    
+    if service:
+        try:
+            # Get file metadata to check if it's a folder
+            file_metadata = service.files().get(fileId=data['file_id'], fields='id,name,mimeType').execute()
+            is_folder = file_metadata.get('mimeType') == 'application/vnd.google-apps.folder'
+            
+            # If it's a folder, get its contents
+            if is_folder:
+                results = service.files().list(
+                    q=f"'{data['file_id']}' in parents and trashed=false",
+                    fields="files(id,name,size,mimeType,createdTime,webViewLink)",
+                    pageSize=1000
+                ).execute()
+                folder_contents = results.get('files', [])
+        except Exception as e:
+            print(f"Error checking folder contents: {str(e)}")
+    
     # Update access count
     doc.reference.update({'access_count': current_views + 1})
     
-    return {
+    response_data = {
         'file_id': data['file_id'], 
         'file_name': data['file_name'], 
         'allow_download': data['allow_download'], 
         'allow_preview': data['allow_preview'],
         'view_limit': view_limit,
-        'views_remaining': view_limit - (current_views + 1) if view_limit else None
+        'views_remaining': view_limit - (current_views + 1) if view_limit else None,
+        'is_folder': is_folder
     }
+    
+    if is_folder and folder_contents is not None:
+        response_data['folder_contents'] = folder_contents
+    
+    return response_data
 
 @app.get("/share/{share_token}/preview")
-async def preview_shared_file(share_token: str):
+async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     if not db: raise HTTPException(status_code=500, detail="Database not available")
     doc = db.collection('share_links').document(share_token).get()
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
@@ -2859,10 +2891,60 @@ async def preview_shared_file(share_token: str):
     
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
-    file_metadata = service.files().get(fileId=data['file_id'], fields='id,name,mimeType,size').execute()
+    # Use provided file_id if available (for files within shared folder), otherwise use original file_id
+    target_file_id = file_id if file_id else data['file_id']
+    
+    # If file_id is provided, verify it's within the shared folder
+    if file_id:
+        try:
+            # Check if the original shared item is a folder
+            original_metadata = service.files().get(fileId=data['file_id'], fields='mimeType').execute()
+            if original_metadata.get('mimeType') != 'application/vnd.google-apps.folder':
+                raise HTTPException(status_code=403, detail="File access not allowed")
+            
+            # Verify the requested file is within the shared folder
+            file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
+            if data['file_id'] not in file_metadata.get('parents', []):
+                raise HTTPException(status_code=403, detail="File not in shared folder")
+        except Exception as e:
+            if "not in shared folder" in str(e) or "File access not allowed" in str(e):
+                raise
+            raise HTTPException(status_code=404, detail="File not found")
+    
+    file_metadata = service.files().get(fileId=target_file_id, fields='id,name,mimeType,size').execute()
+    file_name = file_metadata.get('name', '').lower()
+    
+    # Special handling for CSV files
+    if file_name.endswith('.csv') or file_metadata.get('mimeType') == 'text/csv':
+        request = service.files().get_media(fileId=target_file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        done = False
+        while not done: status, done = downloader.next_chunk()
+        file_io.seek(0)
+        csv_content = file_io.read().decode('utf-8')
+        
+        import csv
+        from io import StringIO
+        csv_reader = csv.reader(StringIO(csv_content))
+        rows = list(csv_reader)
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html><head><title>{file_metadata.get('name', 'File')}</title>
+        <style>table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background-color:#f2f2f2}}</style>
+        </head><body><h2>{file_metadata.get('name', 'File')}</h2><table>
+        """
+        if rows:
+            html_content += "<thead><tr>" + "".join(f"<th>{cell}</th>" for cell in rows[0]) + "</tr></thead><tbody>"
+            for row in rows[1:]:
+                html_content += "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+            html_content += "</tbody>"
+        html_content += "</table></body></html>"
+        return HTMLResponse(content=html_content)
     
     def generate_stream():
-        request = service.files().get_media(fileId=data['file_id'])
+        request = service.files().get_media(fileId=target_file_id)
         file_io = io.BytesIO()
         downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
         
@@ -2884,7 +2966,7 @@ async def preview_shared_file(share_token: str):
     )
 
 @app.get("/share/{share_token}/download")
-async def download_shared_file(share_token: str):
+async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     if not db: raise HTTPException(status_code=500, detail="Database not available")
     doc = db.collection('share_links').document(share_token).get()
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
@@ -2916,10 +2998,30 @@ async def download_shared_file(share_token: str):
     
     if not service: raise HTTPException(status_code=500, detail="Service unavailable")
     
-    file_metadata = service.files().get(fileId=data['file_id'], fields='id,name').execute()
+    # Use provided file_id if available (for files within shared folder), otherwise use original file_id
+    target_file_id = file_id if file_id else data['file_id']
+    
+    # If file_id is provided, verify it's within the shared folder
+    if file_id:
+        try:
+            # Check if the original shared item is a folder
+            original_metadata = service.files().get(fileId=data['file_id'], fields='mimeType').execute()
+            if original_metadata.get('mimeType') != 'application/vnd.google-apps.folder':
+                raise HTTPException(status_code=403, detail="File access not allowed")
+            
+            # Verify the requested file is within the shared folder
+            file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
+            if data['file_id'] not in file_metadata.get('parents', []):
+                raise HTTPException(status_code=403, detail="File not in shared folder")
+        except Exception as e:
+            if "not in shared folder" in str(e) or "File access not allowed" in str(e):
+                raise
+            raise HTTPException(status_code=404, detail="File not found")
+    
+    file_metadata = service.files().get(fileId=target_file_id, fields='id,name').execute()
     
     def generate_stream():
-        request = service.files().get_media(fileId=data['file_id'])
+        request = service.files().get_media(fileId=target_file_id)
         file_io = io.BytesIO()
         downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
         
