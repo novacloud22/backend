@@ -992,14 +992,23 @@ async def upload_file(
             # Delete existing file to overwrite
             service.files().delete(fileId=existing_files[0]['id']).execute()
         
+        # Determine MIME type based on file extension if not provided
+        content_type = file.content_type
+        if not content_type or content_type == 'application/octet-stream':
+            import mimetypes
+            content_type, _ = mimetypes.guess_type(file.filename)
+            if not content_type:
+                content_type = 'application/octet-stream'
+        
         file_metadata = {
             'name': file.filename,
-            'parents': [target_folder_id]
+            'parents': [target_folder_id],
+            'mimeType': content_type
         }
         
         media = MediaIoBaseUpload(
             io.BytesIO(file_content),
-            mimetype=file.content_type or 'application/octet-stream',
+            mimetype=content_type,
             resumable=True
         )
         
@@ -1283,7 +1292,7 @@ async def preview_file(
                 raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
         
         # Get file metadata first
-        file_metadata = service.files().get(fileId=file_id).execute()
+        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
         
         # Download file content
         request = service.files().get_media(fileId=file_id)
@@ -1299,16 +1308,40 @@ async def preview_file(
         # Determine MIME type and headers
         mime_type = file_metadata.get('mimeType', 'application/octet-stream')
         file_name = file_metadata.get('name', '').lower()
-        headers = {'Access-Control-Allow-Origin': '*'}
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=3600',
+            'Content-Length': str(len(file_io.getvalue()))
+        }
         
-        # Handle specific file types
+        # Enhanced file type handling
         if mime_type == 'text/csv' or file_name.endswith('.csv'):
-            mime_type = 'text/plain'
+            mime_type = 'text/plain; charset=utf-8'
             headers['Content-Disposition'] = 'inline'
-        elif file_name.endswith(('.py', '.js', '.css', '.html', '.txt', '.md')):
-            mime_type = 'text/plain'
+        elif file_name.endswith(('.py', '.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.htm', '.txt', '.md', '.json', '.xml', '.yaml', '.yml', '.sql', '.php', '.rb', '.go', '.rs', '.kt', '.swift', '.dart', '.sh', '.bat', '.ps1')):
+            mime_type = 'text/plain; charset=utf-8'
             headers['Content-Disposition'] = 'inline'
-        elif mime_type.startswith('image/'):
+        elif mime_type.startswith('image/') or file_name.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif')):
+            headers['Content-Disposition'] = 'inline'
+            # Keep original image MIME type for proper browser handling
+            if file_name.endswith('.svg'):
+                mime_type = 'image/svg+xml'
+            elif file_name.endswith(('.jpg', '.jpeg')):
+                mime_type = 'image/jpeg'
+            elif file_name.endswith('.png'):
+                mime_type = 'image/png'
+            elif file_name.endswith('.gif'):
+                mime_type = 'image/gif'
+            elif file_name.endswith('.webp'):
+                mime_type = 'image/webp'
+        elif mime_type.startswith('video/') or file_name.endswith(('.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp')):
+            headers['Content-Disposition'] = 'inline'
+            headers['Accept-Ranges'] = 'bytes'
+        elif mime_type.startswith('audio/') or file_name.endswith(('.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma')):
+            headers['Content-Disposition'] = 'inline'
+            headers['Accept-Ranges'] = 'bytes'
+        elif 'pdf' in mime_type or file_name.endswith('.pdf'):
+            mime_type = 'application/pdf'
             headers['Content-Disposition'] = 'inline'
         
         return StreamingResponse(
@@ -1319,9 +1352,11 @@ async def preview_file(
         
     except HttpError as e:
         if e.resp.status == 404:
-            raise HTTPException(status_code=404, detail="File not found")
+            raise HTTPException(status_code=404, detail="File not found or has been deleted")
         elif e.resp.status == 403:
-            raise HTTPException(status_code=403, detail="Access denied to file")
+            raise HTTPException(status_code=403, detail="Access denied to file. Check permissions.")
+        elif e.resp.status == 429:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
         else:
             print(f"Google Drive API error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Google Drive error: {e.resp.status}")
@@ -1336,29 +1371,55 @@ async def download_file(
     drive_id: str = "drive_1",
     current_user: str = Depends(get_current_user)
 ):
-    if use_personal_drive:
-        service = get_user_google_service(current_user, drive_id)
-    else:
-        service = get_google_service()
-    
-    file_metadata = service.files().get(fileId=file_id).execute()
-    request = service.files().get_media(fileId=file_id)
-    
-    file_io = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_io, request)
-    
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-    
-    file_io.seek(0)
-    
-    filename = file_metadata['name']
-    return StreamingResponse(
-        io.BytesIO(file_io.read()),
-        media_type='application/octet-stream',
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
+    try:
+        if use_personal_drive:
+            service = get_user_google_service(current_user, drive_id)
+            if not service:
+                raise HTTPException(status_code=400, detail=f"Personal Google Drive {drive_id} not connected")
+        else:
+            service = get_google_service()
+            if not service:
+                raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
+        
+        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        request = service.files().get_media(fileId=file_id)
+        
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        file_io.seek(0)
+        
+        filename = file_metadata['name']
+        # Sanitize filename for download
+        safe_filename = filename.replace('"', '\"')
+        
+        headers = {
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Content-Length": str(len(file_io.getvalue())),
+            "Cache-Control": "no-cache"
+        }
+        
+        return StreamingResponse(
+            io.BytesIO(file_io.read()),
+            media_type='application/octet-stream',
+            headers=headers
+        )
+        
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found or has been deleted")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        else:
+            print(f"Download error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Download failed: {e.resp.status}")
+    except Exception as e:
+        print(f"Download error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 @app.delete("/delete/{file_id}")
 async def delete_file(
