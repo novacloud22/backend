@@ -1755,28 +1755,39 @@ async def preview_file(
             'Content-Disposition': 'inline'  # Default to inline for preview
         }
         
-        # Enhanced file type handling
-        if mime_type == 'text/csv' or file_name.endswith('.csv'):
+        # Enhanced file type handling for all extensions
+        file_ext = file_name.split('.')[-1] if '.' in file_name else ''
+        
+        # Text files
+        if file_ext in ['txt', 'csv', 'log', 'md', 'py', 'js', 'jsx', 'ts', 'tsx', 'css', 'html', 'htm', 'json', 'xml', 'yaml', 'yml', 'sql', 'php', 'rb', 'go', 'rs', 'kt', 'swift', 'dart', 'sh', 'bat', 'ps1', 'c', 'cpp', 'h', 'hpp', 'java', 'scala', 'r', 'lua', 'm', 'pl', 'ini', 'cfg', 'conf', 'toml']:
             mime_type = 'text/plain; charset=utf-8'
-        elif file_name.endswith(('.py', '.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.htm', '.txt', '.md', '.json', '.xml', '.yaml', '.yml', '.sql', '.php', '.rb', '.go', '.rs', '.kt', '.swift', '.dart', '.sh', '.bat', '.ps1')):
-            mime_type = 'text/plain; charset=utf-8'
-        elif mime_type.startswith('image/') or file_name.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif')):
-            if file_name.endswith('.svg'):
-                mime_type = 'image/svg+xml'
-            elif file_name.endswith(('.jpg', '.jpeg')):
-                mime_type = 'image/jpeg'
-            elif file_name.endswith('.png'):
-                mime_type = 'image/png'
-            elif file_name.endswith('.gif'):
-                mime_type = 'image/gif'
-            elif file_name.endswith('.webp'):
-                mime_type = 'image/webp'
-        elif mime_type.startswith('video/') or file_name.endswith(('.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v', '.3gp')):
-            headers['Accept-Ranges'] = 'bytes'
-        elif mime_type.startswith('audio/') or file_name.endswith(('.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma')):
-            headers['Accept-Ranges'] = 'bytes'
-        elif 'pdf' in mime_type or file_name.endswith('.pdf'):
+        # Images
+        elif file_ext in ['jpg', 'jpeg']:
+            mime_type = 'image/jpeg'
+        elif file_ext == 'png':
+            mime_type = 'image/png'
+        elif file_ext == 'gif':
+            mime_type = 'image/gif'
+        elif file_ext == 'svg':
+            mime_type = 'image/svg+xml'
+        elif file_ext in ['bmp', 'webp', 'ico', 'tiff', 'tif']:
+            mime_type = f'image/{file_ext}'
+        # Documents
+        elif file_ext == 'pdf':
             mime_type = 'application/pdf'
+        elif file_ext in ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']:
+            mime_type = 'application/octet-stream'  # Force download for Office files
+        # Videos
+        elif file_ext in ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv', 'm4v', '3gp', 'ogv']:
+            mime_type = f'video/{"mp4" if file_ext == "m4v" else file_ext}'
+            headers['Accept-Ranges'] = 'bytes'
+        # Audio
+        elif file_ext in ['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a', 'wma']:
+            mime_type = f'audio/{"mpeg" if file_ext == "mp3" else file_ext}'
+            headers['Accept-Ranges'] = 'bytes'
+        # Archives
+        elif file_ext in ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz']:
+            mime_type = 'application/octet-stream'
         
         return StreamingResponse(
             generate_stream(),
@@ -1813,7 +1824,57 @@ async def download_file(
         
         file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
         
-        # Stream file content directly without downloading to server
+        # Check if it's a folder
+        if file_metadata.get('mimeType') == 'application/vnd.google-apps.folder':
+            # For folders, create a ZIP file
+            import zipfile
+            import tempfile
+            
+            def generate_folder_zip():
+                with tempfile.NamedTemporaryFile() as temp_file:
+                    with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        # Get all files in the folder
+                        results = service.files().list(
+                            q=f"'{file_id}' in parents and trashed=false",
+                            fields="files(id,name,mimeType)"
+                        ).execute()
+                        
+                        for file_item in results.get('files', []):
+                            if file_item.get('mimeType') != 'application/vnd.google-apps.folder':
+                                try:
+                                    # Download file content
+                                    request = service.files().get_media(fileId=file_item['id'])
+                                    file_io = io.BytesIO()
+                                    downloader = MediaIoBaseDownload(file_io, request)
+                                    done = False
+                                    while not done:
+                                        status, done = downloader.next_chunk()
+                                    
+                                    # Add to ZIP
+                                    zip_file.writestr(file_item['name'], file_io.getvalue())
+                                except Exception as e:
+                                    print(f"Error adding file {file_item['name']} to ZIP: {str(e)}")
+                    
+                    temp_file.seek(0)
+                    while True:
+                        chunk = temp_file.read(8192)
+                        if not chunk:
+                            break
+                        yield chunk
+            
+            folder_name = file_metadata['name']
+            safe_folder_name = re.sub(r'[<>:"/\\|?*]', '_', folder_name)
+            
+            return StreamingResponse(
+                generate_folder_zip(),
+                media_type='application/zip',
+                headers={
+                    "Content-Disposition": f'attachment; filename="{safe_folder_name}.zip"',
+                    "Cache-Control": "no-cache"
+                }
+            )
+        
+        # For regular files
         def generate_stream():
             request = service.files().get_media(fileId=file_id)
             file_io = io.BytesIO()
@@ -1831,23 +1892,61 @@ async def download_file(
                     file_io.truncate(0)
         
         filename = file_metadata['name']
+        file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
+        
         # Sanitize filename for download while preserving extension
         import re
         safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         if not safe_filename or safe_filename == '_':
-            file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
             safe_filename = f'file.{file_extension}' if file_extension else 'file'
         
-        headers = {
-            "Content-Disposition": f'attachment; filename="{safe_filename}"',
-            "Cache-Control": "no-cache",
-            "Accept-Ranges": "bytes"
+        # Comprehensive MIME type mapping
+        mime_types = {
+            # Images
+            'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif',
+            'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml', 'ico': 'image/x-icon',
+            'tiff': 'image/tiff', 'tif': 'image/tiff',
+            # Documents
+            'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv', 'md': 'text/markdown',
+            'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html', 'htm': 'text/html',
+            'css': 'text/css', 'js': 'application/javascript', 'jsx': 'text/jsx', 'ts': 'text/typescript',
+            'tsx': 'text/tsx', 'py': 'text/x-python', 'java': 'text/x-java-source', 'c': 'text/x-c',
+            'cpp': 'text/x-c++', 'h': 'text/x-c', 'hpp': 'text/x-c++', 'php': 'text/x-php',
+            'rb': 'text/x-ruby', 'go': 'text/x-go', 'rs': 'text/x-rust', 'kt': 'text/x-kotlin',
+            'swift': 'text/x-swift', 'dart': 'text/x-dart', 'sh': 'text/x-shellscript',
+            'bat': 'text/x-msdos-batch', 'ps1': 'text/x-powershell', 'sql': 'text/x-sql',
+            'yaml': 'text/yaml', 'yml': 'text/yaml', 'toml': 'text/x-toml', 'ini': 'text/plain',
+            'cfg': 'text/plain', 'conf': 'text/plain', 'log': 'text/plain',
+            # Office documents
+            'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            # Archives
+            'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+            'tar': 'application/x-tar', 'gz': 'application/gzip', 'bz2': 'application/x-bzip2',
+            'xz': 'application/x-xz',
+            # Videos
+            'mp4': 'video/mp4', 'avi': 'video/x-msvideo', 'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv',
+            'flv': 'video/x-flv', 'webm': 'video/webm', 'mkv': 'video/x-matroska', 'm4v': 'video/mp4',
+            '3gp': 'video/3gpp', 'ogv': 'video/ogg',
+            # Audio
+            'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'aac': 'audio/aac',
+            'flac': 'audio/flac', 'm4a': 'audio/mp4', 'wma': 'audio/x-ms-wma',
+            # Executables
+            'exe': 'application/x-msdownload', 'msi': 'application/x-msi', 'dmg': 'application/x-apple-diskimage',
+            'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm', 'apk': 'application/vnd.android.package-archive',
+            'iso': 'application/x-iso9660-image'
         }
+        proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
         
         return StreamingResponse(
             generate_stream(),
-            media_type='application/octet-stream',
-            headers=headers
+            media_type=proper_mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes"
+            }
         )
         
     except HttpError as e:
@@ -3099,7 +3198,7 @@ async def share_via_email(request: EmailShareRequest, current_user: str = Depend
     # Calculate expiry time
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=1)
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
     
     try:
         share_data = {
@@ -3132,8 +3231,8 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
     # Calculate expiry time properly with UTC timezone
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        # Add a small buffer (1 minute) to prevent immediate expiry due to processing time
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=1)
+        # Use exact hours without buffer to match user expectation
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
     
     if db:
         share_data = {
@@ -3637,22 +3736,42 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     filename = file_metadata.get('name', 'file')
     file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
     
-    # Determine proper MIME type
+    # Comprehensive MIME type mapping
     mime_types = {
-        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-        'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml',
-        'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv',
-        'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html',
-        'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
-        'tar': 'application/x-tar', 'gz': 'application/gzip',
-        'apk': 'application/vnd.android.package-archive',
+        # Images
+        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif',
+        'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml', 'ico': 'image/x-icon',
+        'tiff': 'image/tiff', 'tif': 'image/tiff',
+        # Documents
+        'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv', 'md': 'text/markdown',
+        'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html', 'htm': 'text/html',
+        'css': 'text/css', 'js': 'application/javascript', 'jsx': 'text/jsx', 'ts': 'text/typescript',
+        'tsx': 'text/tsx', 'py': 'text/x-python', 'java': 'text/x-java-source', 'c': 'text/x-c',
+        'cpp': 'text/x-c++', 'h': 'text/x-c', 'hpp': 'text/x-c++', 'php': 'text/x-php',
+        'rb': 'text/x-ruby', 'go': 'text/x-go', 'rs': 'text/x-rust', 'kt': 'text/x-kotlin',
+        'swift': 'text/x-swift', 'dart': 'text/x-dart', 'sh': 'text/x-shellscript',
+        'bat': 'text/x-msdos-batch', 'ps1': 'text/x-powershell', 'sql': 'text/x-sql',
+        'yaml': 'text/yaml', 'yml': 'text/yaml', 'toml': 'text/x-toml', 'ini': 'text/plain',
+        'cfg': 'text/plain', 'conf': 'text/plain', 'log': 'text/plain',
+        # Office documents
         'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        # Archives
+        'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+        'tar': 'application/x-tar', 'gz': 'application/gzip', 'bz2': 'application/x-bzip2',
+        'xz': 'application/x-xz',
+        # Videos
         'mp4': 'video/mp4', 'avi': 'video/x-msvideo', 'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv',
+        'flv': 'video/x-flv', 'webm': 'video/webm', 'mkv': 'video/x-matroska', 'm4v': 'video/mp4',
+        '3gp': 'video/3gpp', 'ogv': 'video/ogg',
+        # Audio
         'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'aac': 'audio/aac',
+        'flac': 'audio/flac', 'm4a': 'audio/mp4', 'wma': 'audio/x-ms-wma',
+        # Executables
         'exe': 'application/x-msdownload', 'msi': 'application/x-msi', 'dmg': 'application/x-apple-diskimage',
-        'iso': 'application/x-iso9660-image', 'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm'
+        'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm', 'apk': 'application/vnd.android.package-archive',
+        'iso': 'application/x-iso9660-image'
     }
     proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
     
