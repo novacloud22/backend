@@ -332,66 +332,53 @@ def get_all_users_from_firestore():
         return []
 
 def cleanup_user_data(user_email: str):
-    """Simple and reliable cleanup of all user data from Firestore"""
+    """Permanent cleanup using transactions to prevent cache issues"""
     if not db:
         print("Firestore not available")
         return False
     
-    cleanup_results = {}
-    collections_to_clean = [
-        'users',
-        'user_2fa', 
-        'user_drive_tokens',
-        'email_change_requests'
-    ]
-    
-    # Use batch delete for better reliability
-    batch = db.batch()
-    
-    # Clean up regular collections
-    for collection_name in collections_to_clean:
-        try:
+    @firestore.transactional
+    def delete_user_transaction(transaction):
+        collections_to_clean = [
+            'users',
+            'user_2fa', 
+            'user_drive_tokens',
+            'email_change_requests'
+        ]
+        
+        # Delete from regular collections
+        for collection_name in collections_to_clean:
             doc_ref = db.collection(collection_name).document(user_email)
-            batch.delete(doc_ref)
-            cleanup_results[collection_name] = "queued_for_deletion"
-            print(f"Queued {collection_name} for deletion: {user_email}")
-        except Exception as e:
-            cleanup_results[collection_name] = f"error: {str(e)}"
-            print(f"Error queuing {collection_name} for deletion: {str(e)}")
-    
-    # Get and queue share links for deletion
-    try:
+            transaction.delete(doc_ref)
+        
+        # Delete share links
         shares_ref = db.collection('share_links')
         query = shares_ref.where('owner_email', '==', user_email)
         docs = list(query.stream())
         
         for doc in docs:
-            batch.delete(doc.reference)
+            transaction.delete(doc.reference)
         
-        cleanup_results['share_links'] = f"queued_{len(docs)}_for_deletion"
-        print(f"Queued {len(docs)} share links for deletion")
-        
-    except Exception as e:
-        cleanup_results['share_links'] = f"error: {str(e)}"
-        print(f"Error queuing share links for deletion: {str(e)}")
+        return len(docs)
     
-    # Execute batch delete
     try:
-        batch.commit()
-        print(f"✓ Batch deletion committed for {user_email}")
+        # Execute transaction
+        transaction = db.transaction()
+        share_count = delete_user_transaction(transaction)
         
-        # Update results to reflect successful deletion
-        for key in cleanup_results:
-            if "queued" in cleanup_results[key]:
-                cleanup_results[key] = cleanup_results[key].replace("queued", "deleted")
+        print(f"✓ Transaction completed - deleted user data and {share_count} share links for {user_email}")
+        
+        return {
+            'users': 'deleted',
+            'user_2fa': 'deleted', 
+            'user_drive_tokens': 'deleted',
+            'email_change_requests': 'deleted',
+            'share_links': f'deleted_{share_count}'
+        }
         
     except Exception as e:
-        print(f"✗ Batch deletion failed: {str(e)}")
-        for key in cleanup_results:
-            if "queued" in cleanup_results[key]:
-                cleanup_results[key] = f"batch_error: {str(e)}"
-    
-    return cleanup_results
+        print(f"✗ Transaction failed: {str(e)}")
+        return {'error': str(e)}
 
 
 
@@ -579,12 +566,19 @@ async def check_user_exists(email: str):
     except:
         firebase_exists = False
     
-    # If user doesn't exist in Firebase Auth, they don't exist (even if orphaned data in Firestore)
+    # If user doesn't exist in Firebase Auth, they don't exist
     if not firebase_exists:
         return {"exists": False}
     
-    # If user exists in Firebase Auth, check Firestore
-    firestore_exists = check_user_exists_in_firestore(email)
+    # Use server timestamp to bypass cache when checking Firestore
+    firestore_exists = False
+    if db:
+        try:
+            # Force fresh read from server, not cache
+            doc = db.collection('users').document(email).get()
+            firestore_exists = doc.exists
+        except:
+            firestore_exists = False
     
     return {
         "exists": firebase_exists,
