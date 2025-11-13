@@ -3132,24 +3132,20 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
         raise HTTPException(status_code=404, detail="File not found")
     
     def generate_stream():
-        try:
-            request = service.files().get_media(fileId=target_file_id)
-            file_io = io.BytesIO()
-            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
-            
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-                if status:
-                    file_io.seek(0)
-                    chunk = file_io.read()
-                    if chunk:
-                        yield chunk
-                    file_io.seek(0)
-                    file_io.truncate(0)
-        except Exception as e:
-            print(f"Stream error for {target_file_id}: {str(e)}")
-            yield b''
+        request = service.files().get_media(fileId=target_file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                file_io.seek(0)
+                chunk = file_io.read()
+                if chunk:
+                    yield chunk
+                file_io.seek(0)
+                file_io.truncate(0)
     
     # Get original filename and preserve extension
     filename = file_metadata.get('name', 'file')
