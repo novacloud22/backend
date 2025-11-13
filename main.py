@@ -2963,7 +2963,30 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     elif 'pdf' in mime_type or file_name.endswith('.pdf'):
         mime_type = 'application/pdf'
     
+    # Quick validation check before streaming
+    try:
+        # Just verify the file exists and we have access
+        file_info = service.files().get(fileId=target_file_id, fields='id,name').execute()
+        print(f"Validated file access for preview: {file_info.get('name')} (ID: {target_file_id})")
+    except HttpError as e:
+        print(f"Google Drive validation error for file {target_file_id}: {e.resp.status} - {str(e)}")
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found or has been deleted")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        elif e.resp.status == 429:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
+        else:
+            raise HTTPException(status_code=500, detail=f"Preview failed: Google Drive error {e.resp.status}")
+    except Exception as e:
+        print(f"Validation error for file {target_file_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+    
     def generate_stream():
+        request = None
+        downloader = None
+        file_io = None
+        
         try:
             request = service.files().get_media(fileId=target_file_id)
             file_io = io.BytesIO()
@@ -2971,17 +2994,45 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
             
             done = False
             while not done:
-                status, done = downloader.next_chunk()
-                if status:
-                    file_io.seek(0)
-                    chunk = file_io.read()
-                    if chunk:
-                        yield chunk
-                    file_io.seek(0)
-                    file_io.truncate(0)
+                try:
+                    status, done = downloader.next_chunk()
+                    if status:
+                        file_io.seek(0)
+                        chunk = file_io.read()
+                        if chunk:
+                            yield chunk
+                        file_io.seek(0)
+                        file_io.truncate(0)
+                except Exception as chunk_error:
+                    print(f"Error during chunk preview for {target_file_id}: {str(chunk_error)}")
+                    # Stop streaming on chunk error
+                    break
+                    
+        except HttpError as e:
+            print(f"Google Drive API error streaming file {target_file_id}: {str(e)}")
+            # For streaming, we can't raise HTTPException, so we yield an error response
+            error_msg = f"Preview failed: {e.resp.status}"
+            if e.resp.status == 404:
+                error_msg = "File not found or has been deleted"
+            elif e.resp.status == 403:
+                error_msg = "Access denied to file"
+            elif e.resp.status == 429:
+                error_msg = "Rate limit exceeded. Please try again later."
+            
+            # Yield a minimal error response that browsers will handle
+            yield error_msg.encode('utf-8')
+            
         except Exception as e:
             print(f"Error streaming file {target_file_id}: {str(e)}")
-            yield b"Error loading file"
+            yield f"Preview failed: {str(e)}".encode('utf-8')
+            
+        finally:
+            # Clean up resources
+            if file_io:
+                try:
+                    file_io.close()
+                except:
+                    pass
     
     headers = {
         'Access-Control-Allow-Origin': '*',
@@ -3076,7 +3127,30 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=404, detail="File not found")
     
+    # Quick validation check before streaming
+    try:
+        # Just verify the file exists and we have access
+        file_info = service.files().get(fileId=target_file_id, fields='id,name').execute()
+        print(f"Validated file access for download: {file_info.get('name')} (ID: {target_file_id})")
+    except HttpError as e:
+        print(f"Google Drive validation error for file {target_file_id}: {e.resp.status} - {str(e)}")
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found or has been deleted")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        elif e.resp.status == 429:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
+        else:
+            raise HTTPException(status_code=500, detail=f"Download failed: Google Drive error {e.resp.status}")
+    except Exception as e:
+        print(f"Validation error for file {target_file_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+    
     def generate_stream():
+        request = None
+        downloader = None
+        file_io = None
+        
         try:
             request = service.files().get_media(fileId=target_file_id)
             file_io = io.BytesIO()
@@ -3084,17 +3158,45 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
             
             done = False
             while not done:
-                status, done = downloader.next_chunk()
-                if status:
-                    file_io.seek(0)
-                    chunk = file_io.read()
-                    if chunk:
-                        yield chunk
-                    file_io.seek(0)
-                    file_io.truncate(0)
+                try:
+                    status, done = downloader.next_chunk()
+                    if status:
+                        file_io.seek(0)
+                        chunk = file_io.read()
+                        if chunk:
+                            yield chunk
+                        file_io.seek(0)
+                        file_io.truncate(0)
+                except Exception as chunk_error:
+                    print(f"Error during chunk download for {target_file_id}: {str(chunk_error)}")
+                    # Stop streaming on chunk error
+                    break
+                    
+        except HttpError as e:
+            print(f"Google Drive API error streaming file {target_file_id}: {str(e)}")
+            # For streaming, we can't raise HTTPException, so we yield an error response
+            error_msg = f"Download failed: {e.resp.status}"
+            if e.resp.status == 404:
+                error_msg = "File not found or has been deleted"
+            elif e.resp.status == 403:
+                error_msg = "Access denied to file"
+            elif e.resp.status == 429:
+                error_msg = "Rate limit exceeded. Please try again later."
+            
+            # Yield a minimal error response that browsers will handle
+            yield error_msg.encode('utf-8')
+            
         except Exception as e:
-            print(f"Error downloading file {target_file_id}: {str(e)}")
-            yield b"Error downloading file"
+            print(f"Error streaming file {target_file_id}: {str(e)}")
+            yield f"Download failed: {str(e)}".encode('utf-8')
+            
+        finally:
+            # Clean up resources
+            if file_io:
+                try:
+                    file_io.close()
+                except:
+                    pass
     
     # Sanitize filename for download
     filename = file_metadata.get('name', 'file')
