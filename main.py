@@ -3132,10 +3132,6 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
         raise HTTPException(status_code=404, detail="File not found")
     
     def generate_stream():
-        request = None
-        downloader = None
-        file_io = None
-        
         try:
             request = service.files().get_media(fileId=target_file_id)
             file_io = io.BytesIO()
@@ -3143,54 +3139,50 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
             
             done = False
             while not done:
-                try:
-                    status, done = downloader.next_chunk()
-                    if status:
-                        file_io.seek(0)
-                        chunk = file_io.read()
-                        if chunk:
-                            yield chunk
-                        file_io.seek(0)
-                        file_io.truncate(0)
-                except Exception as chunk_error:
-                    print(f"Error during chunk download for {target_file_id}: {str(chunk_error)}")
-                    break
-                    
-        except HttpError as e:
-            print(f"Google Drive API error streaming file {target_file_id}: {str(e)}")
-            error_msg = f"Download failed: {e.resp.status}"
-            if e.resp.status == 404:
-                error_msg = "File not found or has been deleted"
-            elif e.resp.status == 403:
-                error_msg = "Access denied to file"
-            elif e.resp.status == 429:
-                error_msg = "Rate limit exceeded. Please try again later."
-            yield error_msg.encode('utf-8')
-            
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
         except Exception as e:
-            print(f"Error streaming file {target_file_id}: {str(e)}")
-            yield f"Download failed: {str(e)}".encode('utf-8')
-            
-        finally:
-            if file_io:
-                try:
-                    file_io.close()
-                except:
-                    pass
+            print(f"Stream error for {target_file_id}: {str(e)}")
+            yield b''
     
     # Get original filename and preserve extension
     filename = file_metadata.get('name', 'file')
+    file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
     
-    # Sanitize filename for download while preserving extension
+    # Determine proper MIME type
+    mime_types = {
+        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+        'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+        'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv',
+        'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html',
+        'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+        'tar': 'application/x-tar', 'gz': 'application/gzip',
+        'apk': 'application/vnd.android.package-archive',
+        'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'mp4': 'video/mp4', 'avi': 'video/x-msvideo', 'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'aac': 'audio/aac',
+        'exe': 'application/x-msdownload', 'msi': 'application/x-msi', 'dmg': 'application/x-apple-diskimage',
+        'iso': 'application/x-iso9660-image', 'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm'
+    }
+    proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
+    
+    # Sanitize filename
     import re
     safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    if not safe_filename or safe_filename == '_':
-        file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
+    if not safe_filename:
         safe_filename = f'file.{file_extension}' if file_extension else 'file'
     
     return StreamingResponse(
         generate_stream(),
-        media_type='application/octet-stream',
+        media_type=proper_mime_type,
         headers={
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
             "Accept-Ranges": "bytes",
