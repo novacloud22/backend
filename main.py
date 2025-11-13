@@ -1878,7 +1878,7 @@ async def download_file(
         def generate_stream():
             request = service.files().get_media(fileId=file_id)
             file_io = io.BytesIO()
-            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=128*1024)  # Optimized chunk size
             
             done = False
             while not done:
@@ -3719,7 +3719,7 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     def generate_stream():
         request = service.files().get_media(fileId=target_file_id)
         file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=128*1024)  # Optimized chunk size
         
         done = False
         while not done:
@@ -3974,13 +3974,27 @@ async def access_shared_email_file(share_id: str):
             if datetime.utcnow() > expires_at:
                 raise HTTPException(status_code=410, detail="Share has expired")
         
+        # Get appropriate service to check if it's a folder
+        if share_data.get('use_personal_drive', False):
+            service = get_user_google_service(share_data['sender_email'], share_data.get('drive_id', 'drive_1'))
+        else:
+            service = get_google_service()
+        
+        is_folder = False
+        if service:
+            try:
+                file_metadata = service.files().get(fileId=share_data['file_id'], fields='mimeType').execute()
+                is_folder = file_metadata.get('mimeType') == 'application/vnd.google-apps.folder'
+            except Exception as e:
+                print(f"Error checking file type: {str(e)}")
+        
         return {
             'file_id': share_data['file_id'],
             'file_name': share_data['file_name'],
             'allow_download': True,  # Email shares allow download by default
-            'allow_preview': True,   # Email shares allow preview by default
+            'allow_preview': not is_folder,  # Only allow preview for files, not folders
             'sender_email': share_data.get('sender_email'),
-            'is_folder': False  # Email shares are typically single files
+            'is_folder': is_folder
         }
         
     except HTTPException:
@@ -4027,9 +4041,13 @@ async def preview_shared_email_file(share_id: str, current_user: Optional[str] =
         if not service:
             raise HTTPException(status_code=500, detail="Service unavailable")
         
-        # Get file metadata and stream
+        # Get file metadata and check if it's a folder
         file_id = share_data['file_id']
         file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        
+        # If it's a folder, return an error instead of trying to stream it
+        if file_metadata.get('mimeType') == 'application/vnd.google-apps.folder':
+            raise HTTPException(status_code=400, detail="Cannot preview folders. Use download to get folder contents as ZIP.")
         
         def generate_stream():
             request = service.files().get_media(fileId=file_id)
