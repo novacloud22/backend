@@ -520,9 +520,9 @@ def update_user_storage(user_email: str):
                 storage_data = {
                     "storage_used": total_size,
                     "storage_display": format_size(total_size),
-                    "storage_limit": 16106127360,
-                    "limit_display": "15 GB",
-                    "storage_percentage": (total_size / 16106127360 * 100) if total_size > 0 else 0
+                    "storage_limit": 5368709120,
+                    "limit_display": "5 GB",
+                    "storage_percentage": (total_size / 5368709120 * 100) if total_size > 0 else 0
                 }
                 
                 import asyncio
@@ -1975,13 +1975,13 @@ async def get_statistics():
         # Calculate uptime
         uptime = 99.9
         
-        # Real storage calculation: 15GB per registered user
-        total_storage = total_registered * 15
+        # Real storage calculation: 5GB per registered user
+        total_storage = total_registered * 5
         
         return {
             "active_users": f"{active_users}" if active_users > 0 else "0",
             "uptime": f"{uptime}%",
-            "free_storage": "15GB",
+            "free_storage": "5GB",
             "countries": f"{countries_count}",
             "total_accounts": total_registered,
             "online_now": online_users,
@@ -1993,7 +1993,7 @@ async def get_statistics():
         return {
             "active_users": "0",
             "uptime": "99.9%",
-            "free_storage": "15GB",
+            "free_storage": "5GB",
             "countries": "1",
             "total_accounts": 0,
             "online_now": 0,
@@ -2028,14 +2028,14 @@ def get_user_storage_data(user_email: str):
             s = int(s)
         return f"{s} {size_names[i]}"
     
-    storage_limit = 16106127360  # 15GB
+    storage_limit = 5368709120  # 5GB
     storage_percentage = (storage_used / storage_limit * 100) if storage_used > 0 else 0
     
     return {
         "storage_used": storage_used,
         "storage_display": format_size(storage_used),
         "storage_limit": storage_limit,
-        "limit_display": "15 GB",
+        "limit_display": "5 GB",
         "storage_percentage": min(storage_percentage, 100)
     }
 
@@ -2153,13 +2153,13 @@ async def get_user_storage(current_user: str = Depends(get_current_user)):
             s = int(s)
         return f"{s} {size_names[i]}"
     
-    storage_limit = 16106127360  # 15GB
+    storage_limit = 5368709120  # 5GB
     
     return {
         "storage_used": total_size,
         "storage_display": format_size(total_size),
         "storage_limit": storage_limit,
-        "limit_display": "15 GB",
+        "limit_display": "5 GB",
         "storage_percentage": (total_size / storage_limit * 100) if total_size > 0 else 0
     }
 
@@ -2225,7 +2225,7 @@ async def get_drive_quota_info(
             raise HTTPException(status_code=404, detail="User not found")
         
         storage_used = user_data.get('storage_used', 0)
-        storage_limit = 16106127360  # 15GB per user
+        storage_limit = 5368709120  # 5GB per user
         
         return {
             "total_storage": storage_limit,
@@ -3066,12 +3066,64 @@ class ShareLinkRequest(BaseModel):
     drive_id: str = "drive_1"
     view_limit: Optional[int] = None  # None means unlimited views
 
+class EmailShareRequest(BaseModel):
+    file_id: str
+    file_name: str
+    recipient_email: str
+    expiry_hours: Optional[int] = 24
+    use_personal_drive: bool = False
+    drive_id: str = "drive_1"
+
 class ShareRequest(BaseModel):
     recipient_email: str
 
 
 
 
+
+@app.post("/share/email")
+async def share_via_email(request: EmailShareRequest, current_user: str = Depends(get_current_user)):
+    """Share file via email to another NovaCloud user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    # Check if recipient exists in NovaCloud
+    try:
+        auth.get_user_by_email(request.recipient_email)
+    except:
+        raise HTTPException(status_code=404, detail="Recipient not found in NovaCloud")
+    
+    if request.recipient_email == current_user:
+        raise HTTPException(status_code=400, detail="Cannot share with yourself")
+    
+    # Calculate expiry time
+    expires_at = None
+    if request.expiry_hours and request.expiry_hours > 0:
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=1)
+    
+    try:
+        share_data = {
+            'file_id': request.file_id,
+            'file_name': request.file_name,
+            'sender_email': current_user,
+            'recipient_email': request.recipient_email,
+            'expires_at': expires_at.isoformat() + 'Z' if expires_at else None,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'use_personal_drive': request.use_personal_drive,
+            'drive_id': request.drive_id,
+            'status': 'active'
+        }
+        
+        doc_ref = db.collection('email_shares').add(share_data)
+        
+        return {
+            "message": f"File shared with {request.recipient_email} successfully",
+            "share_id": doc_ref[1].id
+        }
+        
+    except Exception as e:
+        print(f"Error sharing via email: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to share file")
 
 @app.post("/share/generate-link")
 async def generate_share_link(request: ShareLinkRequest, current_user: str = Depends(get_current_user)):
@@ -3675,6 +3727,52 @@ async def delete_share_link(share_token: str, current_user: str = Depends(get_cu
         print(f"Error deleting share link: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete share link")
 
+@app.post("/share/email")
+async def share_via_email(request: EmailShareRequest, current_user: str = Depends(get_current_user)):
+    """Share file via email to another NovaCloud user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    # Check if recipient exists in NovaCloud
+    try:
+        auth.get_user_by_email(request.recipient_email)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="User not found in NovaCloud")
+    
+    if request.recipient_email == current_user:
+        raise HTTPException(status_code=400, detail="Cannot share with yourself")
+    
+    # Calculate expiry time
+    expires_at = None
+    if request.expiry_hours and request.expiry_hours > 0:
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=1)
+    
+    try:
+        share_data = {
+            'file_id': request.file_id,
+            'file_name': request.file_name,
+            'sender_email': current_user,
+            'recipient_email': request.recipient_email,
+            'expires_at': expires_at.isoformat() + 'Z' if expires_at else None,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'use_personal_drive': request.use_personal_drive,
+            'drive_id': request.drive_id,
+            'status': 'active'
+        }
+        
+        doc_ref = db.collection('email_shares').add(share_data)
+        
+        return {
+            "message": f"File shared with {request.recipient_email} successfully",
+            "share_id": doc_ref[1].id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error sharing via email: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to share file")
+
 # Shared Files Endpoints
 @app.get("/user/check-exists")
 async def check_user_exists_endpoint(email: str):
@@ -3687,12 +3785,12 @@ async def check_user_exists_endpoint(email: str):
 
 @app.get("/shared/with-me")
 async def get_shared_with_me(current_user: str = Depends(get_current_user)):
-    """Get files shared with current user"""
+    """Get files shared with current user via email"""
     if not db:
         raise HTTPException(status_code=500, detail="Database not available")
     
     try:
-        shares_ref = db.collection('user_shares')
+        shares_ref = db.collection('email_shares')
         query = shares_ref.where('recipient_email', '==', current_user)
         docs = list(query.stream())
         
@@ -3711,12 +3809,12 @@ async def get_shared_with_me(current_user: str = Depends(get_current_user)):
 
 @app.get("/shared/by-me")
 async def get_shared_by_me(current_user: str = Depends(get_current_user)):
-    """Get files shared by current user"""
+    """Get files shared by current user via email"""
     if not db:
         raise HTTPException(status_code=500, detail="Database not available")
     
     try:
-        shares_ref = db.collection('user_shares')
+        shares_ref = db.collection('email_shares')
         query = shares_ref.where('sender_email', '==', current_user)
         docs = list(query.stream())
         
@@ -3732,6 +3830,231 @@ async def get_shared_by_me(current_user: str = Depends(get_current_user)):
     except Exception as e:
         print(f"Error getting shared by me: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get shared files")
+
+@app.get("/shared/email/{share_id}/preview")
+async def preview_shared_email_file(share_id: str, current_user: str = Depends(get_current_user)):
+    """Preview a file shared via email"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        doc_ref = db.collection('email_shares').document(share_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Share not found")
+        
+        share_data = doc.to_dict()
+        
+        # Check if user is authorized (sender or recipient)
+        if share_data.get('sender_email') != current_user and share_data.get('recipient_email') != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to access this share")
+        
+        # Check if share is active and not expired
+        if share_data.get('status') != 'active':
+            raise HTTPException(status_code=403, detail="Share is not active")
+        
+        if share_data.get('expires_at'):
+            expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
+            if datetime.utcnow() > expires_at:
+                raise HTTPException(status_code=410, detail="Share has expired")
+        
+        # Get appropriate service
+        if share_data.get('use_personal_drive', False):
+            service = get_user_google_service(share_data['sender_email'], share_data.get('drive_id', 'drive_1'))
+        else:
+            service = get_google_service()
+        
+        if not service:
+            raise HTTPException(status_code=500, detail="Service unavailable")
+        
+        # Get file metadata and stream
+        file_id = share_data['file_id']
+        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        
+        def generate_stream():
+            request = service.files().get_media(fileId=file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type=file_metadata.get('mimeType', 'application/octet-stream'),
+            headers={
+                'Content-Disposition': 'inline',
+                'Cache-Control': 'public, max-age=3600'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error previewing shared file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to preview file")
+
+@app.get("/shared/email/{share_id}/download")
+async def download_shared_email_file(share_id: str, current_user: str = Depends(get_current_user)):
+    """Download a file shared via email"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        doc_ref = db.collection('email_shares').document(share_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Share not found")
+        
+        share_data = doc.to_dict()
+        
+        # Check if user is authorized (sender or recipient)
+        if share_data.get('sender_email') != current_user and share_data.get('recipient_email') != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to access this share")
+        
+        # Check if share is active and not expired
+        if share_data.get('status') != 'active':
+            raise HTTPException(status_code=403, detail="Share is not active")
+        
+        if share_data.get('expires_at'):
+            expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
+            if datetime.utcnow() > expires_at:
+                raise HTTPException(status_code=410, detail="Share has expired")
+        
+        # Get appropriate service
+        if share_data.get('use_personal_drive', False):
+            service = get_user_google_service(share_data['sender_email'], share_data.get('drive_id', 'drive_1'))
+        else:
+            service = get_google_service()
+        
+        if not service:
+            raise HTTPException(status_code=500, detail="Service unavailable")
+        
+        # Get file metadata and stream
+        file_id = share_data['file_id']
+        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        
+        def generate_stream():
+            request = service.files().get_media(fileId=file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
+        
+        filename = file_metadata.get('name', 'file')
+        import re
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type='application/octet-stream',
+            headers={
+                'Content-Disposition': f'attachment; filename="{safe_filename}"',
+                'Cache-Control': 'no-cache'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error downloading shared file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to download file")
+
+@app.delete("/shared/email/{share_id}")
+async def delete_email_share(share_id: str, current_user: str = Depends(get_current_user)):
+    """Delete/expire an email share"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        doc_ref = db.collection('email_shares').document(share_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Share not found")
+        
+        share_data = doc.to_dict()
+        
+        # Check if user is authorized (sender or recipient)
+        if share_data.get('sender_email') != current_user and share_data.get('recipient_email') != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this share")
+        
+        # Expire the share instead of deleting
+        doc_ref.update({
+            'expires_at': datetime.utcnow().isoformat() + 'Z',
+            'status': 'expired',
+            'deleted_by': current_user,
+            'deleted_at': datetime.utcnow().isoformat() + 'Z'
+        })
+        
+        return {"message": "Share deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting email share: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete share")
+
+@app.post("/shared/toggle/{share_id}")
+async def toggle_email_share(share_id: str, current_user: str = Depends(get_current_user)):
+    """Toggle email share status (activate/deactivate)"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        doc_ref = db.collection('email_shares').document(share_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Share not found")
+        
+        share_data = doc.to_dict()
+        
+        # Only sender can toggle
+        if share_data.get('sender_email') != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to modify this share")
+        
+        current_status = share_data.get('status', 'active')
+        new_status = 'inactive' if current_status == 'active' else 'active'
+        
+        # If reactivating, check if not manually expired
+        if new_status == 'active' and share_data.get('expires_at'):
+            expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
+            if datetime.utcnow() > expires_at:
+                raise HTTPException(status_code=400, detail="Cannot reactivate expired share")
+        
+        doc_ref.update({
+            'status': new_status,
+            'toggled_at': datetime.utcnow().isoformat() + 'Z',
+            'toggled_by': current_user
+        })
+        
+        return {"message": f"Share {new_status}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error toggling email share: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to toggle share")
 
 @app.post("/shared/send")
 async def send_share_request(request: ShareRequest, current_user: str = Depends(get_current_user)):
