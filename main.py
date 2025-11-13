@@ -172,7 +172,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         if not email:
             raise HTTPException(status_code=401, detail="Email not found in token")
         
-        # Authenticated user: {email} (UID: {uid})
+        print(f"Authenticated user: {email} (UID: {uid})")
         
         # Ensure user exists in Firestore
         user_data = get_user_from_firestore(email)
@@ -199,7 +199,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         
         return email
     except Exception as e:
-        # Auth Error: {str(e)}
+        print(f"Auth Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 def get_optional_current_user(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer(auto_error=False))):
