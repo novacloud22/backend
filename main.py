@@ -1508,7 +1508,9 @@ async def download_file(
         
         filename = file_metadata['name']
         # Sanitize filename for download
-        safe_filename = filename.replace('"', '\"')
+        import re
+        safe_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)  # Replace non-ASCII with underscore
+        safe_filename = safe_filename.replace('"', '').replace('\\', '_').replace('/', '_')
         
         headers = {
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
@@ -3200,7 +3202,10 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     
     # Sanitize filename for download
     filename = file_metadata.get('name', 'file')
-    safe_filename = filename.replace('"', '\"')
+    # Remove or replace problematic Unicode characters
+    import re
+    safe_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)  # Replace non-ASCII with underscore
+    safe_filename = safe_filename.replace('"', '').replace('\\', '_').replace('/', '_')
     
     return StreamingResponse(
         generate_stream(),
