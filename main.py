@@ -710,10 +710,19 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                 <html>
                 <head>
                     <title>Authorization Complete</title>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <style>
-                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }}
-                        .success {{ color: #28a745; margin-bottom: 20px; }}
-                        .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f8f9fa; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+                        .success {{ color: #28a745; margin-bottom: 20px; font-size: 24px; font-weight: bold; }}
+                        .container {{ max-width: 90%; width: 400px; margin: 0 auto; background: white; padding: 40px 20px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }}
+                        p {{ font-size: 18px; line-height: 1.5; margin: 15px 0; color: #333; }}
+                        small {{ font-size: 16px; color: #666; }}
+                        @media (max-width: 480px) {{
+                            .container {{ padding: 30px 15px; }}
+                            .success {{ font-size: 28px; }}
+                            p {{ font-size: 20px; }}
+                            small {{ font-size: 18px; }}
+                        }}
                     </style>
                 </head>
                 <body>
@@ -749,10 +758,19 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
                 <html>
                 <head>
                     <title>Authorization Complete</title>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <style>
-                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }}
-                        .success {{ color: #28a745; margin-bottom: 20px; }}
-                        .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                        body {{ font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f8f9fa; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+                        .success {{ color: #28a745; margin-bottom: 20px; font-size: 24px; font-weight: bold; }}
+                        .container {{ max-width: 90%; width: 400px; margin: 0 auto; background: white; padding: 40px 20px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }}
+                        p {{ font-size: 18px; line-height: 1.5; margin: 15px 0; color: #333; }}
+                        small {{ font-size: 16px; color: #666; }}
+                        @media (max-width: 480px) {{
+                            .container {{ padding: 30px 15px; }}
+                            .success {{ font-size: 28px; }}
+                            p {{ font-size: 20px; }}
+                            small {{ font-size: 18px; }}
+                        }}
                     </style>
                 </head>
                 <body>
@@ -786,10 +804,19 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
             <html>
             <head>
                 <title>Authorization Error</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>
-                    body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }}
-                    .error {{ color: #dc3545; margin-bottom: 20px; }}
-                    .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                    body {{ font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f8f9fa; margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+                    .error {{ color: #dc3545; margin-bottom: 20px; font-size: 24px; font-weight: bold; }}
+                    .container {{ max-width: 90%; width: 400px; margin: 0 auto; background: white; padding: 40px 20px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }}
+                    p {{ font-size: 18px; line-height: 1.5; margin: 15px 0; color: #333; }}
+                    small {{ font-size: 16px; color: #666; }}
+                    @media (max-width: 480px) {{
+                        .container {{ padding: 30px 15px; }}
+                        .error {{ font-size: 28px; }}
+                        p {{ font-size: 20px; }}
+                        small {{ font-size: 18px; }}
+                    }}
                 </style>
             </head>
             <body>
