@@ -331,8 +331,8 @@ def get_all_users_from_firestore():
         print(f"Error getting all users: {str(e)}")
         return []
 
-def cleanup_user_data(user_email: str, max_retries: int = 3):
-    """Aggressive cleanup of all user data from Firestore with retry mechanism"""
+def cleanup_user_data(user_email: str):
+    """Simple and reliable cleanup of all user data from Firestore"""
     if not db:
         print("Firestore not available")
         return False
@@ -345,123 +345,51 @@ def cleanup_user_data(user_email: str, max_retries: int = 3):
         'email_change_requests'
     ]
     
-    # Clean up regular collections with retry
+    # Use batch delete for better reliability
+    batch = db.batch()
+    
+    # Clean up regular collections
     for collection_name in collections_to_clean:
-        deleted = False
-        for attempt in range(max_retries):
-            try:
-                doc_ref = db.collection(collection_name).document(user_email)
-                doc = doc_ref.get()
-                if doc.exists:
-                    doc_ref.delete()
-                    # Wait a moment and verify deletion
-                    import time
-                    time.sleep(0.5)
-                    verify_doc = doc_ref.get()
-                    if not verify_doc.exists:
-                        cleanup_results[collection_name] = "deleted"
-                        print(f"✓ Deleted {collection_name} data for {user_email}")
-                        deleted = True
-                        break
-                    else:
-                        print(f"Retry {attempt + 1}/{max_retries} for {collection_name}")
-                        if attempt == max_retries - 1:
-                            # Force delete on final attempt
-                            try:
-                                doc_ref.delete()
-                                doc_ref.delete()  # Double delete
-                                cleanup_results[collection_name] = "force_deleted"
-                                print(f"✓ Force deleted {collection_name} for {user_email}")
-                                deleted = True
-                            except:
-                                cleanup_results[collection_name] = "delete_failed"
-                                print(f"✗ Failed to delete {collection_name} for {user_email}")
-                else:
-                    cleanup_results[collection_name] = "not_found"
-                    print(f"- No {collection_name} data found for {user_email}")
-                    deleted = True
-                    break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    cleanup_results[collection_name] = f"error: {str(e)}"
-                    print(f"✗ Error deleting {collection_name} for {user_email}: {str(e)}")
-                else:
-                    print(f"Retry {attempt + 1}/{max_retries} for {collection_name} due to error: {str(e)}")
-        
-        if not deleted:
-            print(f"✗ Could not delete {collection_name} after {max_retries} attempts")
-    
-    # Clean up share links with retry
-    deleted_count = 0
-    failed_count = 0
-    
-    for attempt in range(max_retries):
         try:
-            shares_ref = db.collection('share_links')
-            query = shares_ref.where('owner_email', '==', user_email)
-            docs = list(query.stream())
-            
-            if not docs:
-                cleanup_results['share_links'] = f"deleted_{deleted_count}_failed_{failed_count}"
-                print(f"Share links: {deleted_count} deleted, {failed_count} failed")
-                break
-            
-            for doc in docs:
-                try:
-                    doc_id = doc.id
-                    doc.reference.delete()
-                    # Verify deletion
-                    import time
-                    time.sleep(0.2)
-                    verify_doc = db.collection('share_links').document(doc_id).get()
-                    if not verify_doc.exists:
-                        deleted_count += 1
-                        print(f"✓ Deleted share link {doc_id}")
-                    else:
-                        # Force delete
-                        doc.reference.delete()
-                        deleted_count += 1
-                        print(f"✓ Force deleted share link {doc_id}")
-                except Exception as e:
-                    failed_count += 1
-                    print(f"✗ Error deleting share link {doc.id}: {str(e)}")
-            
-            # Check if any remain
-            remaining_docs = list(query.stream())
-            if not remaining_docs:
-                break
-            else:
-                print(f"Retry {attempt + 1}/{max_retries} - {len(remaining_docs)} share links remain")
-                
+            doc_ref = db.collection(collection_name).document(user_email)
+            batch.delete(doc_ref)
+            cleanup_results[collection_name] = "queued_for_deletion"
+            print(f"Queued {collection_name} for deletion: {user_email}")
         except Exception as e:
-            if attempt == max_retries - 1:
-                cleanup_results['share_links'] = f"error: {str(e)}"
-                print(f"✗ Error querying share links for {user_email}: {str(e)}")
+            cleanup_results[collection_name] = f"error: {str(e)}"
+            print(f"Error queuing {collection_name} for deletion: {str(e)}")
     
-    cleanup_results['share_links'] = f"deleted_{deleted_count}_failed_{failed_count}"
-    
-    # Final verification - check if any data remains
-    remaining_data = False
-    for collection_name in collections_to_clean:
-        try:
-            doc = db.collection(collection_name).document(user_email).get()
-            if doc.exists:
-                remaining_data = True
-                print(f"⚠️ WARNING: {collection_name} data still exists for {user_email}")
-        except:
-            pass
-    
-    # Check remaining share links
+    # Get and queue share links for deletion
     try:
-        remaining_shares = list(db.collection('share_links').where('owner_email', '==', user_email).stream())
-        if remaining_shares:
-            remaining_data = True
-            print(f"⚠️ WARNING: {len(remaining_shares)} share links still exist for {user_email}")
-    except:
-        pass
+        shares_ref = db.collection('share_links')
+        query = shares_ref.where('owner_email', '==', user_email)
+        docs = list(query.stream())
+        
+        for doc in docs:
+            batch.delete(doc.reference)
+        
+        cleanup_results['share_links'] = f"queued_{len(docs)}_for_deletion"
+        print(f"Queued {len(docs)} share links for deletion")
+        
+    except Exception as e:
+        cleanup_results['share_links'] = f"error: {str(e)}"
+        print(f"Error queuing share links for deletion: {str(e)}")
     
-    if not remaining_data:
-        print(f"✓ Complete cleanup verified for {user_email}")
+    # Execute batch delete
+    try:
+        batch.commit()
+        print(f"✓ Batch deletion committed for {user_email}")
+        
+        # Update results to reflect successful deletion
+        for key in cleanup_results:
+            if "queued" in cleanup_results[key]:
+                cleanup_results[key] = cleanup_results[key].replace("queued", "deleted")
+        
+    except Exception as e:
+        print(f"✗ Batch deletion failed: {str(e)}")
+        for key in cleanup_results:
+            if "queued" in cleanup_results[key]:
+                cleanup_results[key] = f"batch_error: {str(e)}"
     
     return cleanup_results
 
@@ -3108,17 +3036,11 @@ async def delete_account(
                 except Exception as e:
                     print(f"Error deleting user folder: {str(e)}")
         
-        # Delete from ALL Firestore collections using aggressive cleanup
+        # Delete from ALL Firestore collections using batch deletion
         if db:
-            print(f"Starting aggressive cleanup for {current_user}")
-            cleanup_results = cleanup_user_data(current_user, max_retries=5)
+            print(f"Starting Firestore cleanup for {current_user}")
+            cleanup_results = cleanup_user_data(current_user)
             print(f"Cleanup results: {cleanup_results}")
-            
-            # Double-check and force cleanup if needed
-            remaining_check = cleanup_user_data(current_user, max_retries=1)
-            if any("error" in str(result) or "failed" in str(result) for result in remaining_check.values()):
-                print(f"Running final cleanup pass for {current_user}")
-                cleanup_user_data(current_user, max_retries=1)
         
         # Delete Firebase user last
         auth.delete_user(firebase_user.uid)
