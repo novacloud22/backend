@@ -67,7 +67,7 @@ class MultiFirestoreManager:
         if not self.db:
             return False
         try:
-            self.db.collection('users').document(user_email).update(updates)
+            self._retry_operation(lambda: self.db.collection('users').document(user_email).update(updates))
             return True
         except Exception as e:
             print(f"Update user failed: {e}")
@@ -77,7 +77,7 @@ class MultiFirestoreManager:
         if not self.db:
             return False
         try:
-            self.db.collection('users').document(user_email).delete()
+            self._retry_operation(lambda: self.db.collection('users').document(user_email).delete())
             return True
         except Exception as e:
             print(f"Delete user failed: {e}")
@@ -87,7 +87,7 @@ class MultiFirestoreManager:
         if not self.db:
             return False
         try:
-            self.db.collection('user_drive_tokens').document(user_email).set(tokens)
+            self._retry_operation(lambda: self.db.collection('user_drive_tokens').document(user_email).set(tokens))
             return True
         except Exception as e:
             print(f"Save tokens failed: {e}")
@@ -97,7 +97,7 @@ class MultiFirestoreManager:
         if not self.db:
             return {}
         try:
-            doc = self.db.collection('user_drive_tokens').document(user_email).get()
+            doc = self._retry_operation(lambda: self.db.collection('user_drive_tokens').document(user_email).get())
             return doc.to_dict() if doc.exists else {}
         except Exception as e:
             print(f"Get tokens failed: {e}")
