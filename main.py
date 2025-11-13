@@ -167,9 +167,35 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         # Verify Firebase ID token
         decoded_token = auth.verify_id_token(credentials.credentials)
         email = decoded_token.get('email')
+        uid = decoded_token.get('uid')
         
         if not email:
             raise HTTPException(status_code=401, detail="Email not found in token")
+        
+        print(f"Authenticated user: {email} (UID: {uid})")
+        
+        # Ensure user exists in Firestore
+        user_data = get_user_from_firestore(email)
+        if not user_data:
+            print(f"User {email} not found in Firestore, creating record")
+            # Auto-create user record if missing
+            try:
+                firebase_user = auth.get_user(uid)
+                new_user = {
+                    "email": email,
+                    "name": firebase_user.display_name or "User",
+                    "uid": uid,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "storage_used": 0,
+                    "total_files": 0,
+                    "total_folders": 0,
+                    "last_login": datetime.utcnow().isoformat(),
+                    "folder_id": None
+                }
+                save_user_to_firestore(email, new_user)
+                print(f"Auto-created user record for {email}")
+            except Exception as create_error:
+                print(f"Failed to auto-create user record: {str(create_error)}")
         
         return email
     except Exception as e:
@@ -247,14 +273,21 @@ def get_user_from_firestore(user_email: str):
         print(f"Error getting user from Firestore: {str(e)}")
         return None
 
-def save_user_to_firestore(user_email: str, user_data: dict):
+def save_user_to_firestore(user_email: str, user_data: dict, overwrite: bool = False):
     """Save user data to Firestore"""
     if not db:
         print(f"Firestore not available, cannot save user {user_email}")
         return False
     try:
         doc_ref = db.collection('users').document(user_email)
-        doc_ref.set(user_data, merge=True)
+        if overwrite:
+            # Completely overwrite existing data
+            doc_ref.set(user_data)
+            print(f"Successfully overwritten user {user_email} in Firestore")
+        else:
+            # Merge with existing data
+            doc_ref.set(user_data, merge=True)
+            print(f"Successfully saved user {user_email} to Firestore")
         return True
     except Exception as e:
         print(f"Error saving user to Firestore: {str(e)}")
@@ -279,7 +312,9 @@ def check_user_exists_in_firestore(user_email: str):
     try:
         doc_ref = db.collection('users').document(user_email)
         doc = doc_ref.get()
-        return doc.exists
+        exists = doc.exists
+        print(f"Firestore check for {user_email}: {exists}")
+        return exists
     except Exception as e:
         print(f"Error checking user existence: {str(e)}")
         return False
@@ -543,22 +578,77 @@ async def health_check():
 @app.post("/check-user-exists")
 async def check_user_exists(email: str):
     """Check if user exists in database"""
-    return {"exists": check_user_exists_in_firestore(email)}
+    # Check Firebase Auth first (primary source of truth)
+    firebase_exists = False
+    try:
+        auth.get_user_by_email(email)
+        firebase_exists = True
+    except:
+        firebase_exists = False
+    
+    # If user doesn't exist in Firebase Auth, they don't exist (even if orphaned data in Firestore)
+    if not firebase_exists:
+        return {"exists": False}
+    
+    # If user exists in Firebase Auth, check Firestore
+    firestore_exists = check_user_exists_in_firestore(email)
+    
+    return {
+        "exists": firebase_exists,
+        "firestore_exists": firestore_exists,
+        "firebase_exists": firebase_exists
+    }
 
 @app.post("/register-user")
 async def register_user(user_data: UserCreate):
     """Register a new user in the database"""
-    # Check if user already exists
+    print(f"Registering user: {user_data.email} with UID: {user_data.uid}")
+    
+    # Check if user already exists in Firestore
     existing_user = get_user_from_firestore(user_data.email)
     if existing_user:
-        # User exists, just update last_login and return success
-        update_user_in_firestore(user_data.email, {
-            "last_login": datetime.utcnow().isoformat(),
-            "uid": user_data.uid  # Update UID in case it changed
-        })
-        return {"message": "User login successful"}
+        existing_uid = existing_user.get('uid')
+        print(f"Found existing user {user_data.email} with UID: {existing_uid}")
+        
+        # If UID is different, this is a new Firebase user with same email (after deletion)
+        if existing_uid != user_data.uid:
+            print(f"UID mismatch - old: {existing_uid}, new: {user_data.uid}. Overwriting with new user data.")
+            
+            # Clean up any orphaned data first
+            cleanup_user_data(user_data.email)
+            
+            # Create completely new user record
+            new_user = {
+                "email": user_data.email,
+                "name": user_data.name,
+                "uid": user_data.uid,
+                "phone": user_data.phone,
+                "organization": user_data.organization,
+                "created_at": datetime.utcnow().isoformat(),
+                "storage_used": 0,
+                "total_files": 0,
+                "total_folders": 0,
+                "last_login": datetime.utcnow().isoformat(),
+                "folder_id": None
+            }
+            
+            # Force overwrite existing data
+            success = save_user_to_firestore(user_data.email, new_user, overwrite=True)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to register user")
+            
+            print(f"Successfully overwritten user data for {user_data.email}")
+            return {"message": "User registered successfully"}
+        else:
+            # Same UID, just update login time
+            print(f"Same UID, updating login time for {user_data.email}")
+            update_user_in_firestore(user_data.email, {
+                "last_login": datetime.utcnow().isoformat()
+            })
+            return {"message": "User login successful"}
     
-    # Create new user
+    # Create new user (no existing record)
+    print(f"Creating new user record for {user_data.email}")
     new_user = {
         "email": user_data.email,
         "name": user_data.name,
@@ -573,9 +663,12 @@ async def register_user(user_data: UserCreate):
         "folder_id": None
     }
     
-    if not save_user_to_firestore(user_data.email, new_user):
+    success = save_user_to_firestore(user_data.email, new_user)
+    if not success:
+        print(f"Failed to save user {user_data.email} to Firestore")
         raise HTTPException(status_code=500, detail="Failed to register user")
     
+    print(f"Successfully registered user {user_data.email}")
     return {"message": "User registered successfully"}
 
 
