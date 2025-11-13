@@ -2311,7 +2311,11 @@ async def debug_share_link(share_token: str):
         time_expired = False
         if data.get('expires_at'):
             try:
-                expires_at = datetime.fromisoformat(data['expires_at'])
+                expires_at_str = data['expires_at']
+                # Handle both formats: with and without 'Z' suffix
+                if expires_at_str.endswith('Z'):
+                    expires_at_str = expires_at_str[:-1]
+                expires_at = datetime.fromisoformat(expires_at_str)
                 debug_info["expires_at_parsed"] = expires_at.isoformat()
                 time_expired = current_time >= expires_at
                 debug_info["time_until_expiry"] = str(expires_at - current_time) if expires_at > current_time else "Already expired"
@@ -2635,10 +2639,11 @@ class ShareLinkRequest(BaseModel):
 async def generate_share_link(request: ShareLinkRequest, current_user: str = Depends(get_current_user)):
     share_token = secrets.token_urlsafe(16)
     
-    # Calculate expiry time properly
+    # Calculate expiry time properly with UTC timezone
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
+        # Add a small buffer (1 minute) to prevent immediate expiry due to processing time
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=1)
     
     if db:
         share_data = {
@@ -2647,10 +2652,10 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
             'owner_email': current_user,
             'allow_download': request.allow_download,
             'allow_preview': request.allow_preview,
-            'expires_at': expires_at.isoformat() if expires_at else None,
+            'expires_at': expires_at.isoformat() + 'Z' if expires_at else None,  # Add Z for UTC
             'access_count': 0,
             'view_limit': request.view_limit,
-            'created_at': datetime.utcnow().isoformat(),
+            'created_at': datetime.utcnow().isoformat() + 'Z',  # Add Z for UTC
             'use_personal_drive': request.use_personal_drive,
             'drive_id': request.drive_id
         }
@@ -2801,7 +2806,11 @@ async def access_shared_file(share_token: str):
     # Check if link is expired by time
     if data.get('expires_at'):
         try:
-            expires_at = datetime.fromisoformat(data['expires_at'])
+            expires_at_str = data['expires_at']
+            # Handle both formats: with and without 'Z' suffix
+            if expires_at_str.endswith('Z'):
+                expires_at_str = expires_at_str[:-1]
+            expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
             if current_time >= expires_at:
                 raise HTTPException(status_code=410, detail="Share link expired")
@@ -2868,7 +2877,10 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     # Check if link is expired by time
     if data.get('expires_at'):
         try:
-            expires_at = datetime.fromisoformat(data['expires_at'])
+            expires_at_str = data['expires_at']
+            if expires_at_str.endswith('Z'):
+                expires_at_str = expires_at_str[:-1]
+            expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
             if current_time >= expires_at:
                 raise HTTPException(status_code=410, detail="Share link expired")
@@ -2881,7 +2893,8 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     if view_limit is not None and current_views >= view_limit:
         raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
     
-    if not data['allow_preview']: raise HTTPException(status_code=403, detail="Preview not allowed")
+    if not data.get('allow_preview', True): 
+        raise HTTPException(status_code=403, detail="Preview not allowed")
     
     # Get appropriate service based on drive type
     if data.get('use_personal_drive', False):
@@ -2889,7 +2902,8 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     else:
         service = get_google_service()
     
-    if not service: raise HTTPException(status_code=500, detail="Service unavailable")
+    if not service: 
+        raise HTTPException(status_code=500, detail="Service unavailable")
     
     # Use provided file_id if available (for files within shared folder), otherwise use original file_id
     target_file_id = file_id if file_id else data['file_id']
@@ -2906,6 +2920,10 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
             file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
             if data['file_id'] not in file_metadata.get('parents', []):
                 raise HTTPException(status_code=403, detail="File not in shared folder")
+        except HttpError as e:
+            if e.resp.status == 404:
+                raise HTTPException(status_code=404, detail="File not found")
+            raise HTTPException(status_code=500, detail="Error accessing file")
         except Exception as e:
             if "not in shared folder" in str(e) or "File access not allowed" in str(e):
                 raise
@@ -2913,73 +2931,91 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     
     try:
         file_metadata = service.files().get(fileId=target_file_id, fields='id,name,mimeType,size').execute()
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        else:
+            raise HTTPException(status_code=500, detail="Error accessing file")
     except Exception as e:
         raise HTTPException(status_code=404, detail="File not found")
     
     file_name = file_metadata.get('name', '').lower()
+    mime_type = file_metadata.get('mimeType', 'application/octet-stream')
     
-    # Special handling for CSV files
-    if file_name.endswith('.csv') or file_metadata.get('mimeType') == 'text/csv':
-        request = service.files().get_media(fileId=target_file_id)
-        file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request)
-        done = False
-        while not done: status, done = downloader.next_chunk()
-        file_io.seek(0)
-        csv_content = file_io.read().decode('utf-8')
-        
-        import csv
-        from io import StringIO
-        csv_reader = csv.reader(StringIO(csv_content))
-        rows = list(csv_reader)
-        
-        html_content = f"""
-        <!DOCTYPE html>
-        <html><head><title>{file_metadata.get('name', 'File')}</title>
-        <style>table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background-color:#f2f2f2}}</style>
-        </head><body><h2>{file_metadata.get('name', 'File')}</h2><table>
-        """
-        if rows:
-            html_content += "<thead><tr>" + "".join(f"<th>{cell}</th>" for cell in rows[0]) + "</tr></thead><tbody>"
-            for row in rows[1:]:
-                html_content += "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
-            html_content += "</tbody>"
-        html_content += "</table></body></html>"
-        return HTMLResponse(content=html_content)
+    # Enhanced file type handling for preview
+    if mime_type == 'text/csv' or file_name.endswith('.csv'):
+        mime_type = 'text/plain; charset=utf-8'
+    elif file_name.endswith(('.py', '.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.htm', '.txt', '.md', '.json', '.xml', '.yaml', '.yml', '.sql', '.php', '.rb', '.go', '.rs', '.kt', '.swift', '.dart', '.sh', '.bat', '.ps1')):
+        mime_type = 'text/plain; charset=utf-8'
+    elif mime_type.startswith('image/') or file_name.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif')):
+        if file_name.endswith('.svg'):
+            mime_type = 'image/svg+xml'
+        elif file_name.endswith(('.jpg', '.jpeg')):
+            mime_type = 'image/jpeg'
+        elif file_name.endswith('.png'):
+            mime_type = 'image/png'
+        elif file_name.endswith('.gif'):
+            mime_type = 'image/gif'
+        elif file_name.endswith('.webp'):
+            mime_type = 'image/webp'
+    elif 'pdf' in mime_type or file_name.endswith('.pdf'):
+        mime_type = 'application/pdf'
     
     def generate_stream():
-        request = service.files().get_media(fileId=target_file_id)
-        file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
-        
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-            if status:
-                file_io.seek(0)
-                chunk = file_io.read()
-                if chunk:
-                    yield chunk
-                file_io.seek(0)
-                file_io.truncate(0)
+        try:
+            request = service.files().get_media(fileId=target_file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
+        except Exception as e:
+            print(f"Error streaming file {target_file_id}: {str(e)}")
+            yield b"Error loading file"
+    
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=3600',
+        'Content-Disposition': 'inline'
+    }
+    
+    if mime_type.startswith('video/') or mime_type.startswith('audio/'):
+        headers['Accept-Ranges'] = 'bytes'
     
     return StreamingResponse(
         generate_stream(),
-        media_type=file_metadata.get('mimeType', 'application/octet-stream'),
-        headers={'Content-Disposition': 'inline'}
+        media_type=mime_type,
+        headers=headers
     )
 
 @app.get("/share/{share_token}/download")
 async def download_shared_file(share_token: str, file_id: Optional[str] = None):
-    if not db: raise HTTPException(status_code=500, detail="Database not available")
+    if not db: 
+        raise HTTPException(status_code=500, detail="Database not available")
+    
     doc = db.collection('share_links').document(share_token).get()
-    if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
+    if not doc.exists: 
+        raise HTTPException(status_code=404, detail="Share link not found")
+    
     data = doc.to_dict()
     
     # Check if link is expired by time
     if data.get('expires_at'):
         try:
-            expires_at = datetime.fromisoformat(data['expires_at'])
+            expires_at_str = data['expires_at']
+            if expires_at_str.endswith('Z'):
+                expires_at_str = expires_at_str[:-1]
+            expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
             if current_time >= expires_at:
                 raise HTTPException(status_code=410, detail="Share link expired")
@@ -2992,7 +3028,8 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     if view_limit is not None and current_views >= view_limit:
         raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
     
-    if not data['allow_download']: raise HTTPException(status_code=403, detail="Download not allowed")
+    if not data.get('allow_download', True): 
+        raise HTTPException(status_code=403, detail="Download not allowed")
     
     # Get appropriate service based on drive type
     if data.get('use_personal_drive', False):
@@ -3000,7 +3037,8 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     else:
         service = get_google_service()
     
-    if not service: raise HTTPException(status_code=500, detail="Service unavailable")
+    if not service: 
+        raise HTTPException(status_code=500, detail="Service unavailable")
     
     # Use provided file_id if available (for files within shared folder), otherwise use original file_id
     target_file_id = file_id if file_id else data['file_id']
@@ -3017,38 +3055,58 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
             file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
             if data['file_id'] not in file_metadata.get('parents', []):
                 raise HTTPException(status_code=403, detail="File not in shared folder")
+        except HttpError as e:
+            if e.resp.status == 404:
+                raise HTTPException(status_code=404, detail="File not found")
+            raise HTTPException(status_code=500, detail="Error accessing file")
         except Exception as e:
             if "not in shared folder" in str(e) or "File access not allowed" in str(e):
                 raise
             raise HTTPException(status_code=404, detail="File not found")
     
     try:
-        file_metadata = service.files().get(fileId=target_file_id, fields='id,name').execute()
+        file_metadata = service.files().get(fileId=target_file_id, fields='id,name,mimeType,size').execute()
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        else:
+            raise HTTPException(status_code=500, detail="Error accessing file")
     except Exception as e:
         raise HTTPException(status_code=404, detail="File not found")
     
     def generate_stream():
-        request = service.files().get_media(fileId=target_file_id)
-        file_io = io.BytesIO()
-        downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
-        
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-            if status:
-                file_io.seek(0)
-                chunk = file_io.read()
-                if chunk:
-                    yield chunk
-                file_io.seek(0)
-                file_io.truncate(0)
+        try:
+            request = service.files().get_media(fileId=target_file_id)
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=1024*1024)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
+        except Exception as e:
+            print(f"Error downloading file {target_file_id}: {str(e)}")
+            yield b"Error downloading file"
+    
+    # Sanitize filename for download
+    filename = file_metadata.get('name', 'file')
+    safe_filename = filename.replace('"', '\"')
     
     return StreamingResponse(
         generate_stream(),
         media_type='application/octet-stream',
         headers={
-            "Content-Disposition": f'attachment; filename="{file_metadata["name"]}"',
-            "Accept-Ranges": "bytes"
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache"
         }
     )
 
