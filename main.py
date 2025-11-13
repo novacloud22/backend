@@ -296,6 +296,54 @@ def get_all_users_from_firestore():
         print(f"Error getting all users: {str(e)}")
         return []
 
+def cleanup_user_data(user_email: str):
+    """Comprehensive cleanup of all user data from Firestore"""
+    if not db:
+        print("Firestore not available")
+        return False
+    
+    cleanup_results = {}
+    collections_to_clean = [
+        'users',
+        'user_2fa', 
+        'user_drive_tokens',
+        'email_change_requests'
+    ]
+    
+    # Clean up regular collections
+    for collection_name in collections_to_clean:
+        try:
+            doc_ref = db.collection(collection_name).document(user_email)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.delete()
+                cleanup_results[collection_name] = "deleted"
+                print(f"Deleted {collection_name} data for {user_email}")
+            else:
+                cleanup_results[collection_name] = "not_found"
+        except Exception as e:
+            cleanup_results[collection_name] = f"error: {str(e)}"
+            print(f"Error deleting {collection_name} for {user_email}: {str(e)}")
+    
+    # Clean up share links (query-based)
+    try:
+        shares_ref = db.collection('share_links')
+        query = shares_ref.where('owner_email', '==', user_email)
+        docs = list(query.stream())
+        deleted_count = 0
+        for doc in docs:
+            doc.reference.delete()
+            deleted_count += 1
+        cleanup_results['share_links'] = f"deleted_{deleted_count}"
+        print(f"Deleted {deleted_count} share links for {user_email}")
+    except Exception as e:
+        cleanup_results['share_links'] = f"error: {str(e)}"
+        print(f"Error deleting share links for {user_email}: {str(e)}")
+    
+    return cleanup_results
+
+
+
 def get_user_google_service(user_email: str, drive_id: str = "drive_1"):
     """Get Google Drive service for a specific user's personal account"""
     # Get tokens from Firestore
@@ -836,6 +884,41 @@ async def oauth2callback(code: Optional[str] = None, state: Optional[str] = None
             return HTMLResponse(content=html_content)
         return {"error": f"Authorization failed: {str(e)}"}
 
+@app.post("/batch-create-folders")
+async def batch_create_folders(
+    folder_names: List[str] = Form(...),
+    parent_folder_id: Optional[str] = Form(None),
+    use_personal_drive: bool = Form(False),
+    drive_id: str = Form("drive_1"),
+    overwrite: bool = Form(False),
+    current_user: str = Depends(get_current_user)
+):
+    
+    results = []
+    errors = []
+    
+    for folder_name in folder_names:
+        try:
+            result = await create_single_folder(
+                folder_name=folder_name,
+                parent_folder_id=parent_folder_id,
+                use_personal_drive=use_personal_drive,
+                drive_id=drive_id,
+                overwrite=overwrite,
+                current_user=current_user
+            )
+            results.append({"folder": folder_name, "success": True, "data": result})
+        except Exception as e:
+            errors.append({"folder": folder_name, "error": str(e)})
+    
+    return {
+        "total_folders": len(folder_names),
+        "successful_creations": len(results),
+        "failed_creations": len(errors),
+        "results": results,
+        "errors": errors
+    }
+
 @app.post("/create-folder")
 async def create_folder(
     folder_name: str = Form(...),
@@ -844,6 +927,23 @@ async def create_folder(
     drive_id: str = Form("drive_1"),
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
+):
+    return await create_single_folder(
+        folder_name=folder_name,
+        parent_folder_id=parent_folder_id,
+        use_personal_drive=use_personal_drive,
+        drive_id=drive_id,
+        overwrite=overwrite,
+        current_user=current_user
+    )
+
+async def create_single_folder(
+    folder_name: str,
+    parent_folder_id: Optional[str] = None,
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    overwrite: bool = False,
+    current_user: str = None
 ):
     if use_personal_drive:
         service = get_user_google_service(current_user, drive_id)
@@ -904,6 +1004,44 @@ async def create_folder(
 
 
 
+@app.post("/batch-upload")
+async def batch_upload_files(
+    files: List[UploadFile] = File(...),
+    folder_id: Optional[str] = Form(None),
+    folder_paths: Optional[List[str]] = Form(None),
+    use_personal_drive: bool = Form(False),
+    drive_id: str = Form("drive_1"),
+    overwrite: bool = Form(False),
+    current_user: str = Depends(get_current_user)
+):
+    
+    results = []
+    errors = []
+    
+    for i, file in enumerate(files):
+        try:
+            folder_path = folder_paths[i] if folder_paths and i < len(folder_paths) else None
+            result = await upload_single_file(
+                file=file,
+                folder_id=folder_id,
+                folder_path=folder_path,
+                use_personal_drive=use_personal_drive,
+                drive_id=drive_id,
+                overwrite=overwrite,
+                current_user=current_user
+            )
+            results.append({"file": file.filename, "success": True, "data": result})
+        except Exception as e:
+            errors.append({"file": file.filename, "error": str(e)})
+    
+    return {
+        "total_files": len(files),
+        "successful_uploads": len(results),
+        "failed_uploads": len(errors),
+        "results": results,
+        "errors": errors
+    }
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -913,6 +1051,25 @@ async def upload_file(
     drive_id: str = Form("drive_1"),
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
+):
+    return await upload_single_file(
+        file=file,
+        folder_id=folder_id,
+        folder_path=folder_path,
+        use_personal_drive=use_personal_drive,
+        drive_id=drive_id,
+        overwrite=overwrite,
+        current_user=current_user
+    )
+
+async def upload_single_file(
+    file: UploadFile,
+    folder_id: Optional[str] = None,
+    folder_path: Optional[str] = None,
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    overwrite: bool = False,
+    current_user: str = None
 ):
     try:
         # Validate file
@@ -2309,6 +2466,8 @@ async def test_personal_drive(current_user: str = Depends(get_current_user), dri
             "error": str(e)
         }
 
+
+
 @app.get("/debug/share/{share_token}")
 async def debug_share_link(share_token: str):
     """Debug endpoint to check share link status"""
@@ -2382,9 +2541,13 @@ async def debug_share_link(share_token: str):
 
 
 
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
 
 # 2FA Utility Functions
 def generate_2fa_secret():
@@ -2618,30 +2781,37 @@ async def delete_account(
                 except Exception as e:
                     print(f"Error deleting user folder: {str(e)}")
         
-        # Delete from Firestore collections
+        # Delete from ALL Firestore collections
         if db:
-            # Delete user data
-            try:
-                db.collection('users').document(current_user).delete()
-                print(f"Deleted user data from Firestore")
-            except Exception as e:
-                print(f"Error deleting user data: {str(e)}")
+            collections_to_clean = [
+                'users',
+                'user_2fa', 
+                'user_drive_tokens',
+                'share_links',
+                'email_change_requests'
+            ]
             
-            # Delete 2FA data
-            try:
-                db.collection('user_2fa').document(current_user).delete()
-                print(f"Deleted 2FA data")
-            except Exception as e:
-                print(f"Error deleting 2FA data: {str(e)}")
-            
-            # Delete drive tokens
-            try:
-                db.collection('user_drive_tokens').document(current_user).delete()
-                print(f"Deleted drive tokens")
-            except Exception as e:
-                print(f"Error deleting drive tokens: {str(e)}")
+            for collection_name in collections_to_clean:
+                try:
+                    if collection_name == 'share_links':
+                        # Delete all share links created by this user
+                        shares_ref = db.collection('share_links')
+                        query = shares_ref.where('owner_email', '==', current_user)
+                        docs = list(query.stream())
+                        for doc in docs:
+                            doc.reference.delete()
+                        print(f"Deleted {len(docs)} share links")
+                    else:
+                        # Delete user document from collection
+                        doc_ref = db.collection(collection_name).document(current_user)
+                        doc = doc_ref.get()
+                        if doc.exists:
+                            doc_ref.delete()
+                            print(f"Deleted {collection_name} data")
+                except Exception as e:
+                    print(f"Error deleting {collection_name}: {str(e)}")
         
-        # Delete Firebase user
+        # Delete Firebase user last
         auth.delete_user(firebase_user.uid)
         print(f"Deleted Firebase user: {firebase_user.uid}")
         
