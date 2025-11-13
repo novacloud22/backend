@@ -113,6 +113,26 @@ class MultiFirestoreManager:
         # Return primary database (failover handled in operations)
         return self.firestore_clients[primary_db]
     
+    def get_best_database_for_new_user(self, user_email: str) -> str:
+        """Get the best database for new users (least loaded)"""
+        if not self.firestore_clients:
+            return 'main'
+        
+        # For new users, prefer non-main databases to reduce load on main
+        db_names = list(self.firestore_clients.keys())
+        
+        # Prefer databases other than 'main' for new users
+        non_main_dbs = [db for db in db_names if db != 'main']
+        if non_main_dbs:
+            # Use round-robin for new users on non-main databases
+            hash_value = int(hashlib.md5(user_email.encode()).hexdigest(), 16)
+            selected_db = non_main_dbs[hash_value % len(non_main_dbs)]
+            print(f"Assigning new user {user_email} to database: {selected_db}")
+            return selected_db
+        
+        # Fallback to main if no other databases
+        return 'main'
+    
     def _execute_with_failover(self, operation, user_email: str, *args, **kwargs):
         """Execute database operation with automatic failover"""
         if not self.firestore_clients:
@@ -153,8 +173,24 @@ class MultiFirestoreManager:
             doc_ref.set(user_data, merge=True)
             return True
         
-        result = self._execute_with_failover(_save_operation, user_email, user_email, data)
-        return result is not None
+        # Check if user already exists in any database
+        existing_user = self.get_user_data(user_email)
+        if existing_user:
+            # User exists, update in their current database
+            result = self._execute_with_failover(_save_operation, user_email, user_email, data)
+            return result is not None
+        else:
+            # New user, place in best available database
+            best_db_name = self.get_best_database_for_new_user(user_email)
+            try:
+                db = self.firestore_clients[best_db_name]
+                _save_operation(db, user_email, data)
+                return True
+            except Exception as e:
+                print(f"Failed to save new user to {best_db_name}: {e}")
+                # Fallback to normal failover
+                result = self._execute_with_failover(_save_operation, user_email, user_email, data)
+                return result is not None
     
     def get_user_data(self, user_email: str) -> Optional[dict]:
         """Get user data from assigned Firestore database with failover"""
@@ -163,7 +199,34 @@ class MultiFirestoreManager:
             doc = doc_ref.get()
             return doc.to_dict() if doc.exists else None
         
-        return self._execute_with_failover(_get_operation, user_email, user_email)
+        # Try primary database first (where user should be)
+        hash_value = int(hashlib.md5(user_email.encode()).hexdigest(), 16)
+        db_names = list(self.firestore_clients.keys())
+        primary_index = hash_value % len(db_names)
+        primary_db = db_names[primary_index]
+        
+        # Try primary database first
+        try:
+            result = _get_operation(self.firestore_clients[primary_db], user_email)
+            if result:
+                return result
+        except Exception as e:
+            print(f"Primary database {primary_db} failed for {user_email}: {e}")
+        
+        # If primary fails, try all other databases
+        for db_name, db_client in self.firestore_clients.items():
+            if db_name == primary_db:  # Skip primary (already tried)
+                continue
+            try:
+                result = _get_operation(db_client, user_email)
+                if result:
+                    print(f"Found user {user_email} in backup database: {db_name}")
+                    return result
+            except Exception as e:
+                print(f"Database {db_name} failed for {user_email}: {e}")
+                continue
+        
+        return None
     
     def update_user_data(self, user_email: str, updates: dict) -> bool:
         """Update user data in assigned Firestore database with failover"""
@@ -172,8 +235,37 @@ class MultiFirestoreManager:
             doc_ref.update(update_data)
             return True
         
-        result = self._execute_with_failover(_update_operation, user_email, user_email, updates)
-        return result is not None
+        # Try primary database first
+        hash_value = int(hashlib.md5(user_email.encode()).hexdigest(), 16)
+        db_names = list(self.firestore_clients.keys())
+        primary_index = hash_value % len(db_names)
+        primary_db = db_names[primary_index]
+        
+        try:
+            doc_ref = self.firestore_clients[primary_db].collection('users').document(user_email)
+            doc = doc_ref.get()
+            if doc.exists:
+                _update_operation(self.firestore_clients[primary_db], user_email, updates)
+                return True
+        except Exception as e:
+            print(f"Primary database {primary_db} failed for update {user_email}: {e}")
+        
+        # If primary fails, try all other databases
+        for db_name, db_client in self.firestore_clients.items():
+            if db_name == primary_db:  # Skip primary
+                continue
+            try:
+                doc_ref = db_client.collection('users').document(user_email)
+                doc = doc_ref.get()
+                if doc.exists:
+                    _update_operation(db_client, user_email, updates)
+                    print(f"Updated user {user_email} in backup database: {db_name}")
+                    return True
+            except Exception as e:
+                print(f"Database {db_name} failed for update {user_email}: {e}")
+                continue
+        
+        return False
     
     def delete_user_data(self, user_email: str) -> bool:
         """Delete user data from assigned Firestore database"""
@@ -205,8 +297,31 @@ class MultiFirestoreManager:
             doc = doc_ref.get()
             return doc.to_dict() if doc.exists else {}
         
-        result = self._execute_with_failover(_get_tokens_operation, user_email, user_email)
-        return result if result is not None else {}
+        # Try primary database first
+        hash_value = int(hashlib.md5(user_email.encode()).hexdigest(), 16)
+        db_names = list(self.firestore_clients.keys())
+        primary_index = hash_value % len(db_names)
+        primary_db = db_names[primary_index]
+        
+        try:
+            result = _get_tokens_operation(self.firestore_clients[primary_db], user_email)
+            if result:
+                return result
+        except Exception as e:
+            print(f"Primary database {primary_db} failed for tokens {user_email}: {e}")
+        
+        # Try all other databases
+        for db_name, db_client in self.firestore_clients.items():
+            if db_name == primary_db:
+                continue
+            try:
+                result = _get_tokens_operation(db_client, user_email)
+                if result:
+                    return result
+            except Exception as e:
+                continue
+        
+        return {}
 
 # Global instance
 db_manager = MultiFirestoreManager()
