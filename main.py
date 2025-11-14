@@ -3778,10 +3778,12 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     }
     proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
     
-    # Sanitize filename
+    # Sanitize filename for HTTP headers (Latin-1 encoding)
     import re
     safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    if not safe_filename:
+    # Remove Unicode characters that can't be encoded in Latin-1
+    safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
+    if not safe_filename or safe_filename.strip() == '':
         safe_filename = f'file.{file_extension}' if file_extension else 'file'
     
     return StreamingResponse(
