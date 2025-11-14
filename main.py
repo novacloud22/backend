@@ -10,7 +10,6 @@ import json
 import io
 import uuid
 import asyncio
-import re
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
@@ -1392,121 +1391,23 @@ def get_drive_service(current_user: str, use_personal_drive: bool = False, drive
         return get_user_google_service(current_user, drive_id)
     return get_google_service()
 
-@app.get("/direct-preview/{file_id}")
-async def get_direct_preview_url(
-    file_id: str,
-    use_personal_drive: bool = False,
-    drive_id: str = "drive_1",
-    request: Request = None
-):
-    """Get direct Google Drive preview URL for a single file"""
-    # Get current user from request (optional for public access)
-    current_user = get_optional_current_user(request) if request else None
-    
-    service = get_drive_service(current_user or '', use_personal_drive, drive_id)
-    if not service:
-        raise HTTPException(status_code=400, detail="Google Drive service not available")
-    
-    try:
-        # Get file metadata to verify access
-        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
-        
-        # Generate direct preview URL
-        direct_preview_url = f"https://drive.google.com/file/d/{file_id}/preview"
-        
-        return {
-            "success": True,
-            "file_id": file_id,
-            "file_name": file_metadata.get('name'),
-            "direct_preview_url": direct_preview_url,
-            "size": file_metadata.get('size'),
-            "mime_type": file_metadata.get('mimeType')
-        }
-    except HttpError as e:
-        if e.resp.status == 404:
-            raise HTTPException(status_code=404, detail="File not found")
-        elif e.resp.status == 403:
-            raise HTTPException(status_code=403, detail="Access denied to file")
-        else:
-            raise HTTPException(status_code=500, detail=f"Google Drive error: {e.resp.status}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get direct preview URL: {str(e)}")
-
-@app.get("/direct-download/{file_id}")
-async def get_direct_download_url(
-    file_id: str,
-    use_personal_drive: bool = False,
-    drive_id: str = "drive_1",
-    request: Request = None
-):
-    """Get direct Google Drive download URL for a single file"""
-    # Get current user from request (optional for public access)
-    current_user = get_optional_current_user(request) if request else None
-    
-    service = get_drive_service(current_user or '', use_personal_drive, drive_id)
-    if not service:
-        raise HTTPException(status_code=400, detail="Google Drive service not available")
-    
-    try:
-        # Get file metadata to verify access
-        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
-        
-        # Generate direct download URL
-        direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        
-        return {
-            "success": True,
-            "file_id": file_id,
-            "file_name": file_metadata.get('name'),
-            "direct_url": direct_url,
-            "size": file_metadata.get('size'),
-            "mime_type": file_metadata.get('mimeType')
-        }
-    except HttpError as e:
-        if e.resp.status == 404:
-            raise HTTPException(status_code=404, detail="File not found")
-        elif e.resp.status == 403:
-            raise HTTPException(status_code=403, detail="Access denied to file")
-        else:
-            raise HTTPException(status_code=500, detail=f"Google Drive error: {e.resp.status}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get direct URL: {str(e)}")
-
 @app.post("/direct-urls")
 async def get_direct_urls(
     file_ids: List[str],
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    request: Request = None
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Get direct Google Drive URLs for multiple files"""
-    # Get current user from request (optional for public access)
-    current_user = get_optional_current_user(request) if request else None
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
     
     service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
         raise HTTPException(status_code=400, detail="Google Drive service not available")
     
-    results = []
-    for file_id in file_ids:
-        try:
-            file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
-            direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            
-            results.append({
-                "success": True,
-                "file_id": file_id,
-                "file_name": file_metadata.get('name'),
-                "direct_url": direct_url,
-                "size": file_metadata.get('size'),
-                "mime_type": file_metadata.get('mimeType')
-            })
-        except Exception as e:
-            results.append({
-                "success": False,
-                "file_id": file_id,
-                "error": str(e)
-            })
+    from parallel_api import get_direct_download_urls
+    results = await get_direct_download_urls(file_ids, service)
     
     return {
         "success": True,
@@ -1519,11 +1420,11 @@ async def stream_file(
     file_id: str,
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    request: Request = None
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Stream file directly from Google Drive without downloading to server"""
-    # Get current user from request (optional for public access)
-    current_user = get_optional_current_user(request) if request else None
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
     
     service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
@@ -1562,11 +1463,11 @@ async def setup_batch_streaming(
     file_ids: List[str],
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    request: Request = None
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     """Setup streaming for multiple files"""
-    # Get current user from request (optional for public access)
-    current_user = get_optional_current_user(request) if request else None
+    if use_personal_drive and not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required for personal drive")
     
     service = get_drive_service(current_user or '', use_personal_drive, drive_id)
     if not service:
@@ -1810,18 +1711,13 @@ async def preview_file(
     file_id: str, 
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    request: Request = None
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     try:
-        # Get current user from request (optional for public access)
-        current_user = get_optional_current_user(request) if request else None
+        if use_personal_drive and not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
         
-        # For shared drive without authentication, use shared service
-        if not use_personal_drive and not current_user:
-            service = get_google_service()
-        else:
-            service = get_drive_service(current_user or '', use_personal_drive, drive_id)
-        
+        service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
             drive_type = "Personal" if use_personal_drive else "Shared"
             raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
@@ -1912,20 +1808,19 @@ async def preview_file(
 @app.get("/download/{file_id}")
 async def download_file(
     file_id: str, 
-    request: Request = None,
+    request: Request,
     use_personal_drive: bool = False,
     drive_id: str = "drive_1"
 ):
     try:
-        # Get current user from request (optional for public access)
-        current_user = get_optional_current_user(request) if request else None
+        # Get current user from request
+        current_user = get_optional_current_user(request)
         
-        # For shared drive without authentication, use shared service
-        if not use_personal_drive and not current_user:
-            service = get_google_service()
-        else:
-            service = get_drive_service(current_user or '', use_personal_drive, drive_id)
+        # For personal drive, authentication is required
+        if use_personal_drive and not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
         
+        service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
             drive_type = "Personal" if use_personal_drive else "Shared"
             raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
@@ -3746,176 +3641,158 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
         headers=headers
     )
 
-
-
 @app.get("/share/{share_token}/download")
 async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     if not db: 
         raise HTTPException(status_code=500, detail="Database not available")
     
-    try:
-        doc = db.collection('share_links').document(share_token).get()
-        if not doc.exists: 
-            raise HTTPException(status_code=404, detail="Share link not found")
-        
-        data = doc.to_dict()
-        
-        # Check if link is expired by time
-        if data.get('expires_at'):
-            try:
-                expires_at_str = data['expires_at']
-                if expires_at_str.endswith('Z'):
-                    expires_at_str = expires_at_str[:-1]
-                expires_at = datetime.fromisoformat(expires_at_str)
-                current_time = datetime.utcnow()
-                if current_time >= expires_at:
-                    raise HTTPException(status_code=410, detail="Share link expired")
-            except ValueError:
-                raise HTTPException(status_code=410, detail="Share link expired")
-        
-        # Check if view limit is reached
-        current_views = data.get('access_count', 0)
-        view_limit = data.get('view_limit')
-        if view_limit is not None and current_views >= view_limit:
-            raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
-        
-        if not data.get('allow_download', True): 
-            raise HTTPException(status_code=403, detail="Download not allowed")
-        
-        # Get appropriate service based on drive type
-        if data.get('use_personal_drive', False):
-            service = get_user_google_service(data['owner_email'], data.get('drive_id', 'drive_1'))
-        else:
-            service = get_google_service()
-        
-        if not service: 
-            raise HTTPException(status_code=500, detail="Service unavailable")
-        
-        # Use provided file_id if available (for files within shared folder), otherwise use original file_id
-        target_file_id = file_id if file_id else data['file_id']
-        
-        # Only verify folder permissions if file_id is provided (accessing file within shared folder)
-        if file_id:
-            try:
-                # Check if the original shared item is a folder
-                original_metadata = service.files().get(fileId=data['file_id'], fields='mimeType').execute()
-                if original_metadata.get('mimeType') != 'application/vnd.google-apps.folder':
-                    raise HTTPException(status_code=403, detail="File access not allowed")
-                
-                # Verify the requested file is within the shared folder
-                file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
-                if data['file_id'] not in file_metadata.get('parents', []):
-                    raise HTTPException(status_code=403, detail="File not in shared folder")
-            except HttpError as e:
-                if e.resp.status == 404:
-                    raise HTTPException(status_code=404, detail="File not found")
-                raise HTTPException(status_code=500, detail="Error accessing file")
-            except Exception as e:
-                if "not in shared folder" in str(e) or "File access not allowed" in str(e):
-                    raise
-                raise HTTPException(status_code=404, detail="File not found")
-        
+    doc = db.collection('share_links').document(share_token).get()
+    if not doc.exists: 
+        raise HTTPException(status_code=404, detail="Share link not found")
+    
+    data = doc.to_dict()
+    
+    # Check if link is expired by time
+    if data.get('expires_at'):
         try:
-            file_metadata = service.files().get(fileId=target_file_id, fields='id,name,mimeType,size').execute()
+            expires_at_str = data['expires_at']
+            if expires_at_str.endswith('Z'):
+                expires_at_str = expires_at_str[:-1]
+            expires_at = datetime.fromisoformat(expires_at_str)
+            current_time = datetime.utcnow()
+            if current_time >= expires_at:
+                raise HTTPException(status_code=410, detail="Share link expired")
+        except ValueError:
+            raise HTTPException(status_code=410, detail="Share link expired")
+    
+    # Check if view limit is reached
+    current_views = data.get('access_count', 0)
+    view_limit = data.get('view_limit')
+    if view_limit is not None and current_views >= view_limit:
+        raise HTTPException(status_code=410, detail="Share link expired - view limit reached")
+    
+    if not data.get('allow_download', True): 
+        raise HTTPException(status_code=403, detail="Download not allowed")
+    
+    # Get appropriate service based on drive type
+    if data.get('use_personal_drive', False):
+        service = get_user_google_service(data['owner_email'], data.get('drive_id', 'drive_1'))
+    else:
+        service = get_google_service()
+    
+    if not service: 
+        raise HTTPException(status_code=500, detail="Service unavailable")
+    
+    # Use provided file_id if available (for files within shared folder), otherwise use original file_id
+    target_file_id = file_id if file_id else data['file_id']
+    
+    # Only verify folder permissions if file_id is provided (accessing file within shared folder)
+    if file_id:
+        try:
+            # Check if the original shared item is a folder
+            original_metadata = service.files().get(fileId=data['file_id'], fields='mimeType').execute()
+            if original_metadata.get('mimeType') != 'application/vnd.google-apps.folder':
+                raise HTTPException(status_code=403, detail="File access not allowed")
+            
+            # Verify the requested file is within the shared folder
+            file_metadata = service.files().get(fileId=file_id, fields='parents').execute()
+            if data['file_id'] not in file_metadata.get('parents', []):
+                raise HTTPException(status_code=403, detail="File not in shared folder")
         except HttpError as e:
             if e.resp.status == 404:
                 raise HTTPException(status_code=404, detail="File not found")
-            elif e.resp.status == 403:
-                raise HTTPException(status_code=403, detail="Access denied to file")
-            else:
-                raise HTTPException(status_code=500, detail="Error accessing file")
+            raise HTTPException(status_code=500, detail="Error accessing file")
         except Exception as e:
+            if "not in shared folder" in str(e) or "File access not allowed" in str(e):
+                raise
             raise HTTPException(status_code=404, detail="File not found")
-        
-        def generate_stream():
-            try:
-                request = service.files().get_media(fileId=target_file_id)
-                file_io = io.BytesIO()
-                downloader = MediaIoBaseDownload(file_io, request, chunksize=128*1024)
-                
-                done = False
-                while not done:
-                    try:
-                        status, done = downloader.next_chunk()
-                        if status:
-                            file_io.seek(0)
-                            chunk = file_io.read()
-                            if chunk:
-                                yield chunk
-                            file_io.seek(0)
-                            file_io.truncate(0)
-                    except Exception as chunk_error:
-                        print(f"Error during chunk download: {str(chunk_error)}")
-                        break
-            except Exception as e:
-                print(f"Error in generate_stream: {str(e)}")
-                yield b""  # Yield empty bytes on error
-        
-        # Get original filename and preserve extension
-        filename = file_metadata.get('name', 'file')
-        file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
-        
-        # Comprehensive MIME type mapping
-        mime_types = {
-            # Images
-            'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif',
-            'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml', 'ico': 'image/x-icon',
-            'tiff': 'image/tiff', 'tif': 'image/tiff',
-            # Documents
-            'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv', 'md': 'text/markdown',
-            'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html', 'htm': 'text/html',
-            'css': 'text/css', 'js': 'application/javascript', 'jsx': 'text/jsx', 'ts': 'text/typescript',
-            'tsx': 'text/tsx', 'py': 'text/x-python', 'java': 'text/x-java-source', 'c': 'text/x-c',
-            'cpp': 'text/x-c++', 'h': 'text/x-c', 'hpp': 'text/x-c++', 'php': 'text/x-php',
-            'rb': 'text/x-ruby', 'go': 'text/x-go', 'rs': 'text/x-rust', 'kt': 'text/x-kotlin',
-            'swift': 'text/x-swift', 'dart': 'text/x-dart', 'sh': 'text/x-shellscript',
-            'bat': 'text/x-msdos-batch', 'ps1': 'text/x-powershell', 'sql': 'text/x-sql',
-            'yaml': 'text/yaml', 'yml': 'text/yaml', 'toml': 'text/x-toml', 'ini': 'text/plain',
-            'cfg': 'text/plain', 'conf': 'text/plain', 'log': 'text/plain',
-            # Office documents
-            'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            # Archives
-            'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
-            'tar': 'application/x-tar', 'gz': 'application/gzip', 'bz2': 'application/x-bzip2',
-            'xz': 'application/x-xz',
-            # Videos
-            'mp4': 'video/mp4', 'avi': 'video/x-msvideo', 'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv',
-            'flv': 'video/x-flv', 'webm': 'video/webm', 'mkv': 'video/x-matroska', 'm4v': 'video/mp4',
-            '3gp': 'video/3gpp', 'ogv': 'video/ogg',
-            # Audio
-            'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'aac': 'audio/aac',
-            'flac': 'audio/flac', 'm4a': 'audio/mp4', 'wma': 'audio/x-ms-wma',
-            # Executables
-            'exe': 'application/x-msdownload', 'msi': 'application/x-msi', 'dmg': 'application/x-apple-diskimage',
-            'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm', 'apk': 'application/vnd.android.package-archive',
-            'iso': 'application/x-iso9660-image'
-        }
-        proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
-        
-        # Sanitize filename
-        import re
-        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        if not safe_filename:
-            safe_filename = f'file.{file_extension}' if file_extension else 'file'
-        
-        return StreamingResponse(
-            generate_stream(),
-            media_type=proper_mime_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{safe_filename}"',
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "no-cache"
-            }
-        )
-        
-    except HTTPException:
-        raise
+    
+    try:
+        file_metadata = service.files().get(fileId=target_file_id, fields='id,name,mimeType,size').execute()
+    except HttpError as e:
+        if e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="File not found")
+        elif e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="Access denied to file")
+        else:
+            raise HTTPException(status_code=500, detail="Error accessing file")
     except Exception as e:
-        print(f"Error in download_shared_file: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to download file")
-
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    def generate_stream():
+        request = service.files().get_media(fileId=target_file_id)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request, chunksize=128*1024)  # Optimized chunk size
+        
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                file_io.seek(0)
+                chunk = file_io.read()
+                if chunk:
+                    yield chunk
+                file_io.seek(0)
+                file_io.truncate(0)
+    
+    # Get original filename and preserve extension
+    filename = file_metadata.get('name', 'file')
+    file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
+    
+    # Comprehensive MIME type mapping
+    mime_types = {
+        # Images
+        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif',
+        'bmp': 'image/bmp', 'webp': 'image/webp', 'svg': 'image/svg+xml', 'ico': 'image/x-icon',
+        'tiff': 'image/tiff', 'tif': 'image/tiff',
+        # Documents
+        'pdf': 'application/pdf', 'txt': 'text/plain', 'csv': 'text/csv', 'md': 'text/markdown',
+        'json': 'application/json', 'xml': 'application/xml', 'html': 'text/html', 'htm': 'text/html',
+        'css': 'text/css', 'js': 'application/javascript', 'jsx': 'text/jsx', 'ts': 'text/typescript',
+        'tsx': 'text/tsx', 'py': 'text/x-python', 'java': 'text/x-java-source', 'c': 'text/x-c',
+        'cpp': 'text/x-c++', 'h': 'text/x-c', 'hpp': 'text/x-c++', 'php': 'text/x-php',
+        'rb': 'text/x-ruby', 'go': 'text/x-go', 'rs': 'text/x-rust', 'kt': 'text/x-kotlin',
+        'swift': 'text/x-swift', 'dart': 'text/x-dart', 'sh': 'text/x-shellscript',
+        'bat': 'text/x-msdos-batch', 'ps1': 'text/x-powershell', 'sql': 'text/x-sql',
+        'yaml': 'text/yaml', 'yml': 'text/yaml', 'toml': 'text/x-toml', 'ini': 'text/plain',
+        'cfg': 'text/plain', 'conf': 'text/plain', 'log': 'text/plain',
+        # Office documents
+        'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        # Archives
+        'zip': 'application/zip', 'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+        'tar': 'application/x-tar', 'gz': 'application/gzip', 'bz2': 'application/x-bzip2',
+        'xz': 'application/x-xz',
+        # Videos
+        'mp4': 'video/mp4', 'avi': 'video/x-msvideo', 'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv',
+        'flv': 'video/x-flv', 'webm': 'video/webm', 'mkv': 'video/x-matroska', 'm4v': 'video/mp4',
+        '3gp': 'video/3gpp', 'ogv': 'video/ogg',
+        # Audio
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'aac': 'audio/aac',
+        'flac': 'audio/flac', 'm4a': 'audio/mp4', 'wma': 'audio/x-ms-wma',
+        # Executables
+        'exe': 'application/x-msdownload', 'msi': 'application/x-msi', 'dmg': 'application/x-apple-diskimage',
+        'deb': 'application/x-debian-package', 'rpm': 'application/x-rpm', 'apk': 'application/vnd.android.package-archive',
+        'iso': 'application/x-iso9660-image'
+    }
+    proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
+    
+    # Sanitize filename
+    import re
+    safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    if not safe_filename:
+        safe_filename = f'file.{file_extension}' if file_extension else 'file'
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type=proper_mime_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache"
+        }
+    )
 
 @app.post("/share/{share_token}/expire")
 async def expire_shared_link(share_token: str, current_user: str = Depends(get_current_user)):
@@ -4242,8 +4119,6 @@ async def preview_shared_email_file(share_id: str, current_user: Optional[str] =
     except Exception as e:
         print(f"Error previewing shared file: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to preview file")
-
-
 
 @app.get("/shared/email/{share_id}/download")
 async def download_shared_email_file(share_id: str, current_user: Optional[str] = Depends(get_optional_current_user)):
