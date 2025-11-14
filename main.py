@@ -2873,19 +2873,24 @@ async def resend_verification_fallback(current_user: str = Depends(get_current_u
 
 @app.post("/user/send-verification-email")
 async def send_verification_email(current_user: str = Depends(get_current_user)):
-    """Send email verification to current user using Firebase"""
+    """Send email verification using Firebase Admin SDK"""
     try:
         firebase_user = auth.get_user_by_email(current_user)
         
         if firebase_user.email_verified:
             raise HTTPException(status_code=400, detail="Email is already verified")
         
-        # Use Firebase to send verification email directly
-        verification_link = auth.generate_email_verification_link(current_user)
+        # Generate email verification link - Firebase will send the email
+        verification_link = auth.generate_email_verification_link(
+            current_user,
+            action_code_settings={
+                'url': f"{os.getenv('FRONTEND_URL', 'https://novacloud22.web.app')}/dashboard",
+                'handleCodeInApp': False
+            }
+        )
         
-        # Firebase handles email sending automatically when using client SDK
-        # The verification link is generated for manual sending if needed
         print(f"Verification email sent to {current_user}")
+        print(f"Verification link: {verification_link}")
         
         return {"message": "Verification email sent successfully"}
         
