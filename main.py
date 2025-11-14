@@ -227,7 +227,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 firebase_user = auth.get_user(uid)
                 new_user = {
                     "email": email,
-                    "name": firebase_user.display_name or "User",
+                    "name": firebase_user.display_name or email.split('@')[0],
                     "uid": uid,
                     "auth_method": "email",
                     "created_at": datetime.utcnow().isoformat(),
@@ -906,16 +906,30 @@ async def register_user(user_data: UserCreate, current_user: Optional[str] = Dep
             firebase_user = auth.get_user(user_data.uid)
             for provider in firebase_user.provider_data:
                 if provider.provider_id == 'github.com':
-                    # Try to extract GitHub username from provider data
+                    # Try multiple methods to get GitHub username
                     if hasattr(provider, 'display_name') and provider.display_name:
                         github_username = provider.display_name
+                    elif hasattr(provider, 'uid') and provider.uid:
+                        # GitHub UID is often the username
+                        github_username = provider.uid
                     break
+            
+            # If still no username, try to extract from Firebase user's display name
+            if not github_username and firebase_user.display_name:
+                github_username = firebase_user.display_name
+                
         except Exception as e:
             print(f"Could not get GitHub username: {str(e)}")
     
     # Use GitHub username if available, otherwise use provided name
-    final_name = github_username if github_username else user_data.name
-    print(f"Using name: {final_name} (GitHub username: {github_username})")
+    # If provided name is just email prefix, prefer GitHub username
+    final_name = user_data.name
+    if github_username and (not user_data.name or user_data.name == user_data.email.split('@')[0]):
+        final_name = github_username
+    elif github_username:
+        final_name = github_username
+        
+    print(f"Using name: {final_name} (GitHub username: {github_username}, provided: {user_data.name})")
     
     # Check if user already exists in Firestore
     existing_user = get_user_from_firestore(user_data.email)
@@ -2886,30 +2900,22 @@ async def resend_verification_fallback(current_user: str = Depends(get_current_u
 
 @app.post("/user/send-verification-email")
 async def send_verification_email(current_user: str = Depends(get_current_user)):
-    """Send email verification using Firebase Admin SDK"""
+    """Trigger email verification from frontend"""
     try:
         firebase_user = auth.get_user_by_email(current_user)
         
         if firebase_user.email_verified:
             raise HTTPException(status_code=400, detail="Email is already verified")
         
-        # Generate and send verification email using Firebase Admin SDK
-        try:
-            verification_link = auth.generate_email_verification_link(current_user)
-            print(f"Verification email sent to {current_user}")
-            print(f"Verification link: {verification_link}")
-            
-            return {"message": "Verification email sent successfully"}
-        except Exception as e:
-            print(f"Failed to send verification email: {str(e)}")
-            return {
-                "message": "Please use Firebase client SDK to send verification email",
-                "action": "SEND_FROM_FRONTEND"
-            }
+        # Return signal for frontend to send verification email
+        return {
+            "message": "Use Firebase client SDK to send verification email",
+            "action": "SEND_FROM_FRONTEND"
+        }
         
     except Exception as e:
-        print(f"Error sending verification email: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to send verification email")
+        print(f"Error checking verification status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process verification request")
 
 @app.get("/user/verification-status")
 async def get_verification_status(current_user: str = Depends(get_current_user)):
