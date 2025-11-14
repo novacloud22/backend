@@ -202,6 +202,24 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         print(f"Auth Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
+def get_optional_current_user(request: Request):
+    """Custom optional auth that handles null tokens gracefully"""
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return None
+            
+        token = auth_header[7:]  # Remove 'Bearer ' prefix
+        
+        # Handle null/undefined tokens
+        if not token or token in ['null', 'undefined', '', 'None']:
+            return None
+            
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token.get('email')
+    except Exception:
+        return None
+
 def get_google_service():
     shared_tokens = load_json_file('shared_tokens.json')
     if not shared_tokens:
@@ -1687,29 +1705,6 @@ async def get_folder_contents(
         return [FileInfo(**file) for file in files]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch folder contents: {str(e)}")
-
-def get_optional_current_user(request: Request):
-    """Custom optional auth that handles null tokens gracefully"""
-    try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return None
-        
-        if not auth_header.startswith('Bearer '):
-            return None
-            
-        token = auth_header[7:]  # Remove 'Bearer ' prefix
-        
-        # Handle null/undefined tokens
-        if not token or token in ['null', 'undefined', '', 'None']:
-            print(f"Ignoring invalid token: {token}")
-            return None
-            
-        decoded_token = auth.verify_id_token(token)
-        return decoded_token.get('email')
-    except Exception as e:
-        print(f"Optional auth error: {str(e)}")
-        return None
 
 @app.get("/preview/{file_id}")
 async def preview_file(
