@@ -157,6 +157,7 @@ class UserProfile(BaseModel):
     github_email: Optional[str] = None
     auth_method: Optional[str] = None
     has_password: bool = False
+    email_verified: bool = False
 
 class Token(BaseModel):
     access_token: str
@@ -208,13 +209,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         decoded_token = auth.verify_id_token(credentials.credentials)
         email = decoded_token.get('email')
         uid = decoded_token.get('uid')
+        email_verified = decoded_token.get('email_verified', False)
         
         # Use email as user identifier
         user_identifier = email
         if not email:
             raise HTTPException(status_code=401, detail="No email found in token")
         
-        print(f"Authenticated user: {user_identifier} (UID: {uid})")
+        print(f"Authenticated user: {user_identifier} (UID: {uid}, Email verified: {email_verified})")
         
         # Ensure user exists in Firestore
         user_data = get_user_from_firestore(user_identifier)
@@ -233,7 +235,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                     "total_files": 0,
                     "total_folders": 0,
                     "last_login": datetime.utcnow().isoformat(),
-                    "folder_id": None
+                    "folder_id": None,
+                    "email_verified": email_verified
                 }
                 save_user_to_firestore(user_identifier, new_user)
                 print(f"Auto-created user record for {user_identifier}")
@@ -244,6 +247,54 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception as e:
         print(f"Auth Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+def check_email_verified(user_email: str) -> bool:
+    """Check if user's email is verified"""
+    try:
+        firebase_user = auth.get_user_by_email(user_email)
+        return firebase_user.email_verified
+    except Exception as e:
+        print(f"Error checking email verification: {str(e)}")
+        return False
+
+def is_manual_signup_user(user_email: str) -> bool:
+    """Check if user signed up manually (email/password) vs OAuth"""
+    try:
+        firebase_user = auth.get_user_by_email(user_email)
+        provider_data = firebase_user.provider_data or []
+        
+        # If user has OAuth providers (Google/GitHub), no verification needed
+        has_oauth = any(p.provider_id in ['google.com', 'github.com'] for p in provider_data)
+        if has_oauth:
+            return False
+        
+        # Only password-only users need verification
+        has_password = any(p.provider_id == 'password' for p in provider_data)
+        return has_password and not has_oauth
+    except Exception as e:
+        print(f"Error checking user signup method: {str(e)}")
+        return False
+
+def needs_email_verification(user_email: str) -> bool:
+    """Check if user needs email verification (manual signup users only)"""
+    if not is_manual_signup_user(user_email):
+        return False  # OAuth users or users with OAuth linked don't need verification
+    return not check_email_verified(user_email)
+
+def get_current_user_with_verification(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get current user and check email verification status"""
+    user_email = get_current_user(credentials)
+    
+    # Check if email is verified
+    email_verified = check_email_verified(user_email)
+    
+    # Update verification status in Firestore
+    try:
+        update_user_in_firestore(user_email, {'email_verified': email_verified})
+    except Exception as e:
+        print(f"Failed to update email verification status: {str(e)}")
+    
+    return user_email, email_verified
 
 def get_optional_current_user(request: Request):
     """Custom optional auth that handles null tokens gracefully"""
@@ -840,36 +891,7 @@ async def check_github_linked(githubEmail: str):
     except Exception as e:
         return {"exists": False}
 
-class GitHubValidateRequest(BaseModel):
-    githubEmail: str
-    githubUid: str
 
-@app.post("/validate-github-account")
-async def validate_github_account(request: GitHubValidateRequest, current_user: str = Depends(get_current_user)):
-    """Validate if GitHub account still exists"""
-    try:
-        # Try to get Firebase user to check if GitHub provider is still valid
-        firebase_user = auth.get_user(request.githubUid)
-        
-        # Check if GitHub is still in provider data
-        github_provider_found = False
-        for provider in firebase_user.provider_data:
-            if provider.provider_id == 'github.com':
-                github_provider_found = True
-                break
-        
-        if not github_provider_found:
-            return {"valid": False}
-        
-        # Additional check: verify the email matches
-        if firebase_user.email != request.githubEmail:
-            return {"valid": False}
-            
-        return {"valid": True}
-        
-    except Exception as e:
-        print(f"GitHub validation error: {str(e)}")
-        return {"valid": False}
 
 @app.post("/register-user")
 async def register_user(user_data: UserCreate, current_user: Optional[str] = Depends(get_optional_current_user)):
@@ -1308,6 +1330,17 @@ async def batch_create_folders(
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
 ):
+    # Check email verification for batch folder creation limits (manual signup users only)
+    if needs_email_verification(current_user):
+        # Count existing folders for unverified users
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            total_folders = user_data.get('total_folders', 0)
+            if total_folders + len(folder_names) > 2:
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Email verification required. Unverified users can only create 2 folders total. You are trying to create {len(folder_names)} folders but only have {max(0, 2 - total_folders)} slots remaining."
+                )
     
     results = []
     errors = []
@@ -1326,6 +1359,13 @@ async def batch_create_folders(
         except Exception as e:
             errors.append({"folder": folder_name, "error": str(e)})
     
+    # Update folder count for unverified manual signup users
+    if needs_email_verification(current_user) and results:
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            new_count = user_data.get('total_folders', 0) + len(results)
+            update_user_in_firestore(current_user, {'total_folders': new_count})
+    
     return {
         "total_folders": len(folder_names),
         "successful_creations": len(results),
@@ -1343,7 +1383,19 @@ async def create_folder(
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
 ):
-    return await create_single_folder(
+    # Check email verification for folder limits (manual signup users only)
+    if needs_email_verification(current_user):
+        # Count existing folders for unverified users
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            total_folders = user_data.get('total_folders', 0)
+            if total_folders >= 2:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Email verification required. Unverified users can only create 2 folders. Please verify your email to create more folders."
+                )
+    
+    result = await create_single_folder(
         folder_name=folder_name,
         parent_folder_id=parent_folder_id,
         use_personal_drive=use_personal_drive,
@@ -1351,6 +1403,15 @@ async def create_folder(
         overwrite=overwrite,
         current_user=current_user
     )
+    
+    # Update folder count for unverified manual signup users
+    if needs_email_verification(current_user):
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            new_count = user_data.get('total_folders', 0) + 1
+            update_user_in_firestore(current_user, {'total_folders': new_count})
+    
+    return result
 
 async def create_single_folder(
     folder_name: str,
@@ -1429,6 +1490,17 @@ async def batch_upload_files(
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
 ):
+    # Check email verification for batch upload limits (manual signup users only)
+    if needs_email_verification(current_user):
+        # Count existing files for unverified users
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            total_files = user_data.get('total_files', 0)
+            if total_files + len(files) > 2:
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Email verification required. Unverified users can only upload 2 files total. You are trying to upload {len(files)} files but only have {max(0, 2 - total_files)} slots remaining."
+                )
     
     results = []
     errors = []
@@ -1449,6 +1521,13 @@ async def batch_upload_files(
         except Exception as e:
             errors.append({"file": file.filename, "error": str(e)})
     
+    # Update file count for unverified manual signup users
+    if needs_email_verification(current_user) and results:
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            new_count = user_data.get('total_files', 0) + len(results)
+            update_user_in_firestore(current_user, {'total_files': new_count})
+    
     return {
         "total_files": len(files),
         "successful_uploads": len(results),
@@ -1467,7 +1546,19 @@ async def upload_file(
     overwrite: bool = Form(False),
     current_user: str = Depends(get_current_user)
 ):
-    return await upload_single_file(
+    # Check email verification for upload limits (manual signup users only)
+    if needs_email_verification(current_user):
+        # Count existing files for unverified users
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            total_files = user_data.get('total_files', 0)
+            if total_files >= 2:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Email verification required. Unverified users can only upload 2 files. Please verify your email to upload more files."
+                )
+    
+    result = await upload_single_file(
         file=file,
         folder_id=folder_id,
         folder_path=folder_path,
@@ -1476,6 +1567,15 @@ async def upload_file(
         overwrite=overwrite,
         current_user=current_user
     )
+    
+    # Update file count for unverified manual signup users
+    if needs_email_verification(current_user):
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            new_count = user_data.get('total_files', 0) + 1
+            update_user_in_firestore(current_user, {'total_files': new_count})
+    
+    return result
 
 async def upload_single_file(
     file: UploadFile,
@@ -2692,6 +2792,9 @@ async def get_profile(current_user: str = Depends(get_current_user)):
         for drive_id in user_tokens
     )
     
+    # Add email verification status
+    user_data["email_verified"] = check_email_verified(current_user)
+    
     # Add linked account information
     user_data["google_email"] = user_data.get('google_email')
     user_data["github_email"] = user_data.get('github_email')
@@ -2774,6 +2877,94 @@ async def set_password_for_oauth_user(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to set password")
+
+@app.post("/user/send-verification-email")
+async def send_verification_email(current_user: str = Depends(get_current_user)):
+    """Send email verification to current user"""
+    try:
+        firebase_user = auth.get_user_by_email(current_user)
+        
+        if firebase_user.email_verified:
+            raise HTTPException(status_code=400, detail="Email is already verified")
+        
+        # Generate verification link using Firebase Admin SDK
+        verification_link = auth.generate_email_verification_link(current_user)
+        
+        # In a real implementation, you would send this via your email service
+        # For now, we'll log it and return success
+        print(f"\n=== EMAIL VERIFICATION ===")
+        print(f"To: {current_user}")
+        print(f"Subject: Verify your NovaCloud email address")
+        print(f"""Please verify your email address by clicking the link below:
+{verification_link}
+
+If you did not create a NovaCloud account, please ignore this email.""")
+        print(f"========================\n")
+        
+        return {"message": "Verification email sent successfully"}
+        
+    except Exception as e:
+        print(f"Error sending verification email: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to send verification email")
+
+@app.get("/user/verification-status")
+async def get_verification_status(current_user: str = Depends(get_current_user)):
+    """Get email verification status for current user"""
+    try:
+        email_verified = check_email_verified(current_user)
+        
+        # Update status in Firestore
+        update_user_in_firestore(current_user, {'email_verified': email_verified})
+        
+        # Get upload limits for unverified manual signup users
+        upload_limits = None
+        if not email_verified and is_manual_signup_user(current_user):
+            user_data = get_user_from_firestore(current_user)
+            if user_data:
+                upload_limits = {
+                    "files_uploaded": user_data.get('total_files', 0),
+                    "folders_created": user_data.get('total_folders', 0),
+                    "max_files": 2,
+                    "max_folders": 2,
+                    "files_remaining": max(0, 2 - user_data.get('total_files', 0)),
+                    "folders_remaining": max(0, 2 - user_data.get('total_folders', 0))
+                }
+        
+        return {
+            "email_verified": email_verified,
+            "is_manual_signup": is_manual_signup_user(current_user),
+            "upload_limits": upload_limits
+        }
+        
+    except Exception as e:
+        print(f"Error getting verification status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get verification status")
+
+@app.post("/user/refresh-verification-status")
+async def refresh_verification_status(current_user: str = Depends(get_current_user)):
+    """Refresh email verification status from Firebase"""
+    try:
+        email_verified = check_email_verified(current_user)
+        
+        # Update status in Firestore
+        update_user_in_firestore(current_user, {'email_verified': email_verified})
+        
+        if email_verified:
+            # Remove upload limits for verified users
+            user_data = get_user_from_firestore(current_user)
+            if user_data:
+                # Reset counters or keep them for statistics
+                # For now, we'll keep the counters but remove the limits
+                pass
+        
+        return {
+            "email_verified": email_verified,
+            "message": "Verification status updated" if email_verified else "Email not yet verified"
+        }
+        
+    except Exception as e:
+        print(f"Error refreshing verification status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to refresh verification status")
 
 @app.post("/user/email/change-request")
 async def request_email_change(
@@ -3547,6 +3738,13 @@ async def share_via_email(request: EmailShareRequest, current_user: str = Depend
     if not db:
         raise HTTPException(status_code=500, detail="Database not available")
     
+    # Check email verification for sharing (manual signup users only)
+    if needs_email_verification(current_user):
+        raise HTTPException(
+            status_code=403, 
+            detail="Email verification required. Please verify your email address before sharing files."
+        )
+    
     # Check if recipient exists in NovaCloud
     try:
         auth.get_user_by_email(request.recipient_email)
@@ -3587,6 +3785,13 @@ async def share_via_email(request: EmailShareRequest, current_user: str = Depend
 
 @app.post("/share/generate-link")
 async def generate_share_link(request: ShareLinkRequest, current_user: str = Depends(get_current_user)):
+    # Check email verification for sharing (manual signup users only)
+    if needs_email_verification(current_user):
+        raise HTTPException(
+            status_code=403, 
+            detail="Email verification required. Please verify your email address before creating share links."
+        )
+    
     share_token = secrets.token_urlsafe(16)
     
     # Calculate expiry time properly with UTC timezone
