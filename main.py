@@ -169,8 +169,6 @@ class FileInfo(BaseModel):
     size: int
     mimeType: str
     createdTime: str
-    webViewLink: Optional[str] = None
-    webContentLink: Optional[str] = None
     path: Optional[str] = None
     basename: Optional[str] = None
 
@@ -1753,7 +1751,7 @@ async def upload_single_file(
         uploaded_file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id,name,size,mimeType,createdTime,webViewLink,webContentLink'
+            fields='id,name,size,mimeType,createdTime'
         ).execute()
         
         # Update user storage in real-time (only for shared drive)
@@ -2007,7 +2005,7 @@ async def list_files(
         while True:
             params = {
                 'q': folder_query,
-                'fields': "nextPageToken,files(id,name,size,mimeType,createdTime,webViewLink,webContentLink,parents)",
+                'fields': "nextPageToken,files(id,name,size,mimeType,createdTime,parents)",
                 'pageSize': 1000
             }
             if page_token:
@@ -2100,7 +2098,7 @@ async def get_folder_contents(
         def get_folder_contents_recursive(folder_id, path=""):
             results = service.files().list(
                 q=f"'{folder_id}' in parents and trashed=false",
-                fields="files(id,name,size,mimeType,createdTime,webViewLink,webContentLink)"
+                fields="files(id,name,size,mimeType,createdTime)"
             ).execute()
             files = results.get('files', [])
             
@@ -4002,7 +4000,7 @@ async def access_shared_file(share_token: str):
             if is_folder:
                 results = service.files().list(
                     q=f"'{data['file_id']}' in parents and trashed=false",
-                    fields="files(id,name,size,mimeType,createdTime,webViewLink)",
+                    fields="files(id,name,size,mimeType,createdTime)",
                     pageSize=1000
                 ).execute()
                 folder_contents = results.get('files', [])
