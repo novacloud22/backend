@@ -30,6 +30,8 @@ from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request as GoogleRequest
 from dotenv import load_dotenv
 from parallel_api import parallel_processor, async_parallel
+from fast_download import create_fast_download_stream
+from fast_endpoints import fast_download_handler
 
 load_dotenv()
 
@@ -39,12 +41,12 @@ def get_optimal_chunk_size(file_size: int) -> int:
     if file_size > 500 * 1024 * 1024:  # >500MB
         return 16 * 1024 * 1024  # 16MB for very large files
     elif file_size > 100 * 1024 * 1024:  # >100MB
-        return 8 * 1024 * 1024  # 8MB for large files
+        return 12 * 1024 * 1024  # 12MB for large files
     elif file_size > 50 * 1024 * 1024:  # >50MB
-        return 4 * 1024 * 1024  # 4MB for medium files
+        return 8 * 1024 * 1024  # 8MB for medium files - FASTER
     elif file_size > 10 * 1024 * 1024:  # >10MB
-        return 2 * 1024 * 1024  # 2MB for small-medium files
-    return 1024 * 1024  # 1MB default
+        return 4 * 1024 * 1024  # 4MB for small-medium files
+    return 2 * 1024 * 1024  # 2MB default - FASTER
 
 def get_optimal_upload_chunk_size(file_size: int) -> int:
     """Get optimal chunk size for uploads based on file size"""
@@ -2694,11 +2696,8 @@ async def download_file(
     current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     try:
-        # For personal drive, authentication is required
         if use_personal_drive and not current_user:
             raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
-        
-        # Note: Removed strict account mismatch check - backend uses stored tokens
         
         service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
@@ -2706,6 +2705,11 @@ async def download_file(
             raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
         
         file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        file_size = int(file_metadata.get('size', 0))
+        
+        # Use fast download for files > 20MB
+        if file_size > 20 * 1024 * 1024:
+            return await fast_download_handler(file_id, service, file_metadata)
         
         # Check if it's a folder
         if file_metadata.get('mimeType') == 'application/vnd.google-apps.folder':
@@ -2830,20 +2834,14 @@ async def download_file(
         }
         proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
         
-        file_size = int(file_metadata.get('size', 0))
-        
         # Enhanced headers for better download performance
         headers = {
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
             "Cache-Control": "public, max-age=3600",
             "Accept-Ranges": "bytes",
             "Connection": "keep-alive",
-            "Content-Length": str(file_size),
-            "Transfer-Encoding": "chunked" if file_size > 50 * 1024 * 1024 else None
+            "Content-Length": str(file_size)
         }
-        
-        # Remove None values
-        headers = {k: v for k, v in headers.items() if v is not None}
         
         return StreamingResponse(
             generate_stream(),
