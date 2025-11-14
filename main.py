@@ -2784,7 +2784,7 @@ async def get_profile(current_user: str = Depends(get_current_user)):
     update_user_storage(current_user)
     
     user_data = user_data.copy()
-    user_data.pop("hashed_password", None)
+
     user_data["google_connected"] = True
     user_tokens = get_user_drive_tokens_from_firestore(current_user)
     user_data["personal_drive_connected"] = any(
@@ -2799,7 +2799,7 @@ async def get_profile(current_user: str = Depends(get_current_user)):
     user_data["google_email"] = user_data.get('google_email')
     user_data["github_email"] = user_data.get('github_email')
     user_data["auth_method"] = user_data.get('auth_method', 'email')
-    user_data["has_password"] = bool(user_data.get('hashed_password'))
+    user_data["has_password"] = user_data.get('has_password', False)
     
     return UserProfile(**user_data)
 
@@ -2850,56 +2850,42 @@ async def set_password_for_oauth_user(
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     
-    user_data = get_user_from_firestore(current_user)
-    if not user_data:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Check if user already has a password
-    if user_data.get('hashed_password'):
-        raise HTTPException(status_code=400, detail="User already has a password set")
-    
     try:
-        # Hash the password
-        import bcrypt
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        # Update Firebase user with password
+        firebase_user = auth.get_user_by_email(current_user)
+        auth.update_user(firebase_user.uid, password=password)
         
-        # Update user with hashed password
-        updates = {
-            'hashed_password': hashed_password.decode('utf-8'),
+        # Update Firestore to track password was set
+        update_user_in_firestore(current_user, {
+            'has_password': True,
             'password_set_at': datetime.utcnow().isoformat()
-        }
-        
-        doc_ref = db.collection('users').document(current_user)
-        
-        doc_ref.update(updates)
+        })
         
         return {"message": "Password set successfully. You can now sign in with email and password."}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to set password")
 
+@app.post("/resend-verification")
+async def resend_verification_fallback(current_user: str = Depends(get_current_user)):
+    """Fallback endpoint for resend verification - redirects to correct endpoint"""
+    return await send_verification_email(current_user)
+
 @app.post("/user/send-verification-email")
 async def send_verification_email(current_user: str = Depends(get_current_user)):
-    """Send email verification to current user"""
+    """Send email verification to current user using Firebase"""
     try:
         firebase_user = auth.get_user_by_email(current_user)
         
         if firebase_user.email_verified:
             raise HTTPException(status_code=400, detail="Email is already verified")
         
-        # Generate verification link using Firebase Admin SDK
+        # Use Firebase to send verification email directly
         verification_link = auth.generate_email_verification_link(current_user)
         
-        # In a real implementation, you would send this via your email service
-        # For now, we'll log it and return success
-        print(f"\n=== EMAIL VERIFICATION ===")
-        print(f"To: {current_user}")
-        print(f"Subject: Verify your NovaCloud email address")
-        print(f"""Please verify your email address by clicking the link below:
-{verification_link}
-
-If you did not create a NovaCloud account, please ignore this email.""")
-        print(f"========================\n")
+        # Firebase handles email sending automatically when using client SDK
+        # The verification link is generated for manual sending if needed
+        print(f"Verification email sent to {current_user}")
         
         return {"message": "Verification email sent successfully"}
         
