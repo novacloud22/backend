@@ -7,9 +7,9 @@ import aiohttp
 from urllib.parse import urlencode
 
 class ParallelAPIProcessor:
-    """Handle parallel API operations with direct Google Drive URLs and streaming"""
+    """Handle parallel API operations with direct Google Drive URLs and optimized streaming"""
     
-    def __init__(self, max_workers: int = 20):
+    def __init__(self, max_workers: int = 30):
         self.max_workers = max_workers
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self.session = None
@@ -113,25 +113,38 @@ class ParallelAPIProcessor:
             raise Exception(f"Failed to get direct URL for {file_id}: {str(e)}")
     
     async def _stream_download(self, operation: Dict[str, Any]) -> Dict[str, Any]:
-        """Stream download from Google Drive without server storage"""
+        """Stream download from Google Drive with optimized chunking"""
         file_id = operation['file_id']
         service = operation['service']
         
         try:
-            # Get download URL
+            # Get file metadata for optimal chunking
+            file_metadata = service.files().get(fileId=file_id, fields='id,name,size').execute()
+            file_size = int(file_metadata.get('size', 0))
+            
+            # Calculate optimal chunk size
+            if file_size > 500 * 1024 * 1024:  # >500MB
+                chunk_size = 16 * 1024 * 1024  # 16MB
+            elif file_size > 100 * 1024 * 1024:  # >100MB
+                chunk_size = 8 * 1024 * 1024  # 8MB
+            elif file_size > 50 * 1024 * 1024:  # >50MB
+                chunk_size = 4 * 1024 * 1024  # 4MB
+            else:
+                chunk_size = 2 * 1024 * 1024  # 2MB
+            
+            # Get download request
             request = service.files().get_media(fileId=file_id)
             
-            # Stream the file
-            session = await self.get_session()
-            
-            # Use Google Drive API streaming
             return {
                 'file_id': file_id,
                 'stream_ready': True,
-                'download_request': request
+                'download_request': request,
+                'optimal_chunk_size': chunk_size,
+                'file_size': file_size,
+                'file_name': file_metadata.get('name')
             }
         except Exception as e:
-            raise Exception(f"Failed to setup stream for {file_id}: {str(e)}")
+            raise Exception(f"Failed to setup optimized stream for {file_id}: {str(e)}")
     
     async def _batch_metadata(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Get metadata for multiple files in batch"""
@@ -172,7 +185,7 @@ class ParallelAPIProcessor:
             raise Exception(f"Batch metadata failed: {str(e)}")
     
     async def _parallel_upload(self, operation: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle parallel file upload with chunking"""
+        """Handle parallel file upload with optimized chunking"""
         file_data = operation['file_data']
         service = operation['service']
         metadata = operation['metadata']
@@ -181,24 +194,47 @@ class ParallelAPIProcessor:
             from googleapiclient.http import MediaIoBaseUpload
             import io
             
+            # Calculate optimal chunk size based on file size
+            file_size = len(file_data)
+            if file_size > 100 * 1024 * 1024:  # >100MB
+                chunk_size = 8 * 1024 * 1024  # 8MB chunks
+            elif file_size > 50 * 1024 * 1024:  # >50MB
+                chunk_size = 4 * 1024 * 1024  # 4MB chunks
+            elif file_size > 10 * 1024 * 1024:  # >10MB
+                chunk_size = 2 * 1024 * 1024  # 2MB chunks
+            else:
+                chunk_size = 1024 * 1024  # 1MB default
+            
             media = MediaIoBaseUpload(
                 io.BytesIO(file_data),
                 mimetype=metadata.get('mimeType', 'application/octet-stream'),
                 resumable=True,
-                chunksize=1024*1024  # 1MB chunks
+                chunksize=chunk_size
             )
             
-            uploaded_file = service.files().create(
+            # Upload with progress tracking for large files
+            request = service.files().create(
                 body=metadata,
                 media_body=media,
                 fields='id,name,size,mimeType,createdTime,webViewLink,webContentLink'
-            ).execute()
+            )
+            
+            response = None
+            bytes_uploaded = 0
+            while response is None:
+                status, response = request.next_chunk()
+                if status:
+                    bytes_uploaded = status.resumable_progress
+                    if file_size > 50 * 1024 * 1024 and bytes_uploaded % (10 * 1024 * 1024) == 0:
+                        progress = (bytes_uploaded / file_size) * 100 if file_size > 0 else 0
+                        print(f"Parallel upload progress: {progress:.1f}% ({bytes_uploaded}/{file_size} bytes)")
             
             return {
-                'file_id': uploaded_file['id'],
-                'name': uploaded_file['name'],
-                'size': uploaded_file.get('size'),
-                'upload_success': True
+                'file_id': response['id'],
+                'name': response['name'],
+                'size': response.get('size'),
+                'upload_success': True,
+                'bytes_uploaded': bytes_uploaded
             }
         except Exception as e:
             raise Exception(f"Upload failed: {str(e)}")
@@ -267,3 +303,30 @@ async def get_direct_download_urls(file_ids: List[str], service) -> List[Dict[st
 async def setup_streaming_downloads(file_ids: List[str], service) -> List[Dict[str, Any]]:
     """Setup streaming downloads for multiple files"""
     return await parallel_processor.stream_multiple_files(file_ids, service)
+
+async def batch_upload_large_files(files_data: List[Dict[str, Any]], service) -> List[Dict[str, Any]]:
+    """Upload multiple large files in parallel with optimized chunking"""
+    operations = [
+        {
+            'type': 'parallel_upload',
+            'file_data': file_info['data'],
+            'service': service,
+            'metadata': file_info['metadata']
+        }
+        for file_info in files_data
+    ]
+    
+    return await parallel_processor.batch_file_operations(operations)
+
+async def batch_download_large_files(file_ids: List[str], service) -> List[Dict[str, Any]]:
+    """Setup optimized streaming for multiple large files"""
+    operations = [
+        {
+            'type': 'stream_download',
+            'file_id': file_id,
+            'service': service
+        }
+        for file_id in file_ids
+    ]
+    
+    return await parallel_processor.batch_file_operations(operations)
