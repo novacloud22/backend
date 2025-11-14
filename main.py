@@ -1109,7 +1109,7 @@ async def create_single_folder(
         
         user_folder_id = user_data.get('folder_id')
         if not user_folder_id:
-            user_folder_id = get_user_folder(service, current_user)
+            user_folder_id = get_user_folder(service, user_data['name'])
             update_user_in_firestore(current_user, {'folder_id': user_folder_id})
         default_parent = user_folder_id
     
@@ -1262,7 +1262,7 @@ async def upload_single_file(
             if e.resp.status == 404:
                 # Folder was deleted, create new one
                 print(f"User folder {user_folder_id} not found, creating new one")
-                user_folder_id = get_user_folder(service, current_user)
+                user_folder_id = get_user_folder(service, user_data['name'])
                 if not user_folder_id:
                     raise HTTPException(status_code=500, detail="Failed to create user folder")
                 update_user_in_firestore(current_user, {'folder_id': user_folder_id})
@@ -1842,14 +1842,11 @@ async def preview_file(
 @app.get("/download/{file_id}")
 async def download_file(
     file_id: str, 
-    request: Request,
     use_personal_drive: bool = False,
-    drive_id: str = "drive_1"
+    drive_id: str = "drive_1",
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     try:
-        # Get current user from request
-        current_user = get_optional_current_user(request)
-        
         # For personal drive, authentication is required
         if use_personal_drive and not current_user:
             raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
@@ -2265,7 +2262,7 @@ async def get_user_storage(current_user: str = Depends(get_current_user)):
     # Create folder if doesn't exist
     user_folder_id = user_data.get('folder_id')
     if not user_folder_id:
-        user_folder_id = get_user_folder(service, current_user)
+        user_folder_id = get_user_folder(service, user_data['name'])
         if user_folder_id:
             update_user_in_firestore(current_user, {'folder_id': user_folder_id})
     
