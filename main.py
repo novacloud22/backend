@@ -3772,10 +3772,10 @@ async def share_via_email(request: EmailShareRequest, current_user: str = Depend
     if request.recipient_email == current_user:
         raise HTTPException(status_code=400, detail="Cannot share with yourself")
     
-    # Calculate expiry time
+    # Calculate expiry time with proper precision
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
     
     try:
         share_data = {
@@ -3812,11 +3812,11 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
     
     share_token = secrets.token_urlsafe(16)
     
-    # Calculate expiry time properly with UTC timezone
+    # Calculate expiry time with proper precision
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        # Use exact hours without buffer to match user expectation
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours)
+        # Add exact hours with proper UTC handling
+        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
     
     if db:
         share_data = {
@@ -3985,7 +3985,8 @@ async def access_shared_file(share_token: str):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            if current_time >= expires_at:
+            # Add 30 second buffer to account for processing time
+            if current_time > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share link expired")
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
@@ -4055,7 +4056,8 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            if current_time >= expires_at:
+            # Add 30 second buffer to account for processing time
+            if current_time > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share link expired")
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
@@ -4241,7 +4243,8 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            if current_time >= expires_at:
+            # Add 30 second buffer to account for processing time
+            if current_time > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share link expired")
         except ValueError:
             raise HTTPException(status_code=410, detail="Share link expired")
@@ -4591,7 +4594,8 @@ async def access_shared_email_file(share_id: str):
         
         if share_data.get('expires_at'):
             expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
-            if datetime.utcnow() > expires_at:
+            # Add 30 second buffer to account for processing time
+            if datetime.utcnow() > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share has expired")
         
         # Get appropriate service to check if it's a folder
@@ -4649,7 +4653,8 @@ async def preview_shared_email_file(share_id: str, current_user: Optional[str] =
         
         if share_data.get('expires_at'):
             expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
-            if datetime.utcnow() > expires_at:
+            # Add 30 second buffer to account for processing time
+            if datetime.utcnow() > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share has expired")
         
         # Get appropriate service
@@ -4763,7 +4768,8 @@ async def download_shared_email_file(share_id: str, current_user: Optional[str] 
         
         if share_data.get('expires_at'):
             expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
-            if datetime.utcnow() > expires_at:
+            # Add 30 second buffer to account for processing time
+            if datetime.utcnow() > (expires_at + timedelta(seconds=30)):
                 raise HTTPException(status_code=410, detail="Share has expired")
         
         # Get appropriate service
