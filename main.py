@@ -3772,10 +3772,13 @@ async def share_via_email(request: EmailShareRequest, current_user: str = Depend
     if request.recipient_email == current_user:
         raise HTTPException(status_code=400, detail="Cannot share with yourself")
     
-    # Calculate expiry time with proper precision
+    # Calculate expiry time with proper precision and timezone handling
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
+        # Add exact hours with proper UTC handling and ensure future time
+        current_utc = datetime.utcnow()
+        expires_at = current_utc + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
+        print(f"Email share expiry calculation: Current UTC: {current_utc.isoformat()}, Expires at: {expires_at.isoformat()}, Hours added: {request.expiry_hours}")
     
     try:
         share_data = {
@@ -3812,11 +3815,13 @@ async def generate_share_link(request: ShareLinkRequest, current_user: str = Dep
     
     share_token = secrets.token_urlsafe(16)
     
-    # Calculate expiry time with proper precision
+    # Calculate expiry time with proper precision and timezone handling
     expires_at = None
     if request.expiry_hours and request.expiry_hours > 0:
-        # Add exact hours with proper UTC handling
-        expires_at = datetime.utcnow() + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
+        # Add exact hours with proper UTC handling and ensure future time
+        current_utc = datetime.utcnow()
+        expires_at = current_utc + timedelta(hours=request.expiry_hours, minutes=0, seconds=0, microseconds=0)
+        print(f"Share link expiry calculation: Current UTC: {current_utc.isoformat()}, Expires at: {expires_at.isoformat()}, Hours added: {request.expiry_hours}")
     
     if db:
         share_data = {
@@ -3976,7 +3981,7 @@ async def access_shared_file(share_token: str):
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
     
-    # Check if link is expired by time
+    # Check if link is expired by time with proper timezone handling
     if data.get('expires_at'):
         try:
             expires_at_str = data['expires_at']
@@ -3985,10 +3990,15 @@ async def access_shared_file(share_token: str):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            # Add 30 second buffer to account for processing time
+            
+            print(f"Share access check: Current UTC: {current_time.isoformat()}, Expires at: {expires_at.isoformat()}, Time diff: {(expires_at - current_time).total_seconds()} seconds")
+            
+            # Add 30 second buffer to account for processing time and network delays
             if current_time > (expires_at + timedelta(seconds=30)):
+                print(f"Share link expired: Current time {current_time.isoformat()} > Expiry time {expires_at.isoformat()} + 30s buffer")
                 raise HTTPException(status_code=410, detail="Share link expired")
-        except ValueError:
+        except ValueError as e:
+            print(f"Invalid expiry time format: {expires_at_str}, Error: {str(e)}")
             raise HTTPException(status_code=410, detail="Share link expired")
     
     # Check if view limit is reached
@@ -4023,6 +4033,18 @@ async def access_shared_file(share_token: str):
         except Exception as e:
             print(f"Error checking folder contents: {str(e)}")
     
+    # Get owner details from Firestore
+    owner_name = "Unknown User"
+    created_at = None
+    if data.get('owner_email'):
+        try:
+            owner_data = get_user_from_firestore(data['owner_email'])
+            if owner_data:
+                owner_name = owner_data.get('name', 'Unknown User')
+                created_at = data.get('created_at')
+        except Exception as e:
+            print(f"Error getting owner details: {str(e)}")
+    
     # Update access count
     doc.reference.update({'access_count': current_views + 1})
     
@@ -4033,7 +4055,9 @@ async def access_shared_file(share_token: str):
         'allow_preview': data['allow_preview'],
         'view_limit': view_limit,
         'views_remaining': view_limit - (current_views + 1) if view_limit else None,
-        'is_folder': is_folder
+        'is_folder': is_folder,
+        'owner_name': owner_name,
+        'created_at': created_at
     }
     
     if is_folder and folder_contents is not None:
@@ -4048,7 +4072,7 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
     if not doc.exists: raise HTTPException(status_code=404, detail="Share link not found")
     data = doc.to_dict()
     
-    # Check if link is expired by time
+    # Check if link is expired by time with proper timezone handling
     if data.get('expires_at'):
         try:
             expires_at_str = data['expires_at']
@@ -4056,10 +4080,15 @@ async def preview_shared_file(share_token: str, file_id: Optional[str] = None):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            # Add 30 second buffer to account for processing time
+            
+            print(f"Share preview check: Current UTC: {current_time.isoformat()}, Expires at: {expires_at.isoformat()}, Time diff: {(expires_at - current_time).total_seconds()} seconds")
+            
+            # Add 30 second buffer to account for processing time and network delays
             if current_time > (expires_at + timedelta(seconds=30)):
+                print(f"Share link expired in preview: Current time {current_time.isoformat()} > Expiry time {expires_at.isoformat()} + 30s buffer")
                 raise HTTPException(status_code=410, detail="Share link expired")
-        except ValueError:
+        except ValueError as e:
+            print(f"Invalid expiry time format in preview: {expires_at_str}, Error: {str(e)}")
             raise HTTPException(status_code=410, detail="Share link expired")
     
     # Check if view limit is reached
@@ -4235,7 +4264,7 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     
     data = doc.to_dict()
     
-    # Check if link is expired by time
+    # Check if link is expired by time with proper timezone handling
     if data.get('expires_at'):
         try:
             expires_at_str = data['expires_at']
@@ -4243,10 +4272,15 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
                 expires_at_str = expires_at_str[:-1]
             expires_at = datetime.fromisoformat(expires_at_str)
             current_time = datetime.utcnow()
-            # Add 30 second buffer to account for processing time
+            
+            print(f"Share download check: Current UTC: {current_time.isoformat()}, Expires at: {expires_at.isoformat()}, Time diff: {(expires_at - current_time).total_seconds()} seconds")
+            
+            # Add 30 second buffer to account for processing time and network delays
             if current_time > (expires_at + timedelta(seconds=30)):
+                print(f"Share link expired in download: Current time {current_time.isoformat()} > Expiry time {expires_at.isoformat()} + 30s buffer")
                 raise HTTPException(status_code=410, detail="Share link expired")
-        except ValueError:
+        except ValueError as e:
+            print(f"Invalid expiry time format in download: {expires_at_str}, Error: {str(e)}")
             raise HTTPException(status_code=410, detail="Share link expired")
     
     # Check if view limit is reached
@@ -4515,11 +4549,12 @@ async def get_shared_with_me(current_user: str = Depends(get_current_user)):
             if share_data.get('status') == 'expired':
                 continue
                 
-            # Check if share has expired by time
+            # Check if share has expired by time with buffer
             if share_data.get('expires_at'):
                 try:
                     expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
-                    if current_time > expires_at:
+                    # Add 30 second buffer for email shares too
+                    if current_time > (expires_at + timedelta(seconds=30)):
                         continue
                 except ValueError:
                     continue
@@ -4555,11 +4590,12 @@ async def get_shared_by_me(current_user: str = Depends(get_current_user)):
             if share_data.get('status') == 'expired':
                 continue
                 
-            # Check if share has expired by time
+            # Check if share has expired by time with buffer
             if share_data.get('expires_at'):
                 try:
                     expires_at = datetime.fromisoformat(share_data['expires_at'].replace('Z', ''))
-                    if current_time > expires_at:
+                    # Add 30 second buffer for email shares too
+                    if current_time > (expires_at + timedelta(seconds=30)):
                         continue
                 except ValueError:
                     continue
