@@ -37,11 +37,23 @@ load_dotenv()
 def get_optimal_chunk_size(file_size: int) -> int:
     """Get optimal chunk size based on file size for faster downloads"""
     if file_size > 500 * 1024 * 1024:  # >500MB
-        return 8 * 1024 * 1024  # 8MB
+        return 16 * 1024 * 1024  # 16MB for very large files
     elif file_size > 100 * 1024 * 1024:  # >100MB
-        return 4 * 1024 * 1024  # 4MB
+        return 8 * 1024 * 1024  # 8MB for large files
+    elif file_size > 50 * 1024 * 1024:  # >50MB
+        return 4 * 1024 * 1024  # 4MB for medium files
     elif file_size > 10 * 1024 * 1024:  # >10MB
-        return 2 * 1024 * 1024  # 2MB
+        return 2 * 1024 * 1024  # 2MB for small-medium files
+    return 1024 * 1024  # 1MB default
+
+def get_optimal_upload_chunk_size(file_size: int) -> int:
+    """Get optimal chunk size for uploads based on file size"""
+    if file_size > 100 * 1024 * 1024:  # >100MB
+        return 8 * 1024 * 1024  # 8MB chunks for large uploads
+    elif file_size > 50 * 1024 * 1024:  # >50MB
+        return 4 * 1024 * 1024  # 4MB chunks
+    elif file_size > 10 * 1024 * 1024:  # >10MB
+        return 2 * 1024 * 1024  # 2MB chunks
     return 1024 * 1024  # 1MB default
 
 # Connection pooling for Google API
@@ -1742,10 +1754,15 @@ async def upload_single_file(
             'mimeType': content_type
         }
         
+        # Use optimal chunk size for uploads
+        file_size = len(file_content)
+        upload_chunk_size = get_optimal_upload_chunk_size(file_size)
+        
         media = MediaIoBaseUpload(
             io.BytesIO(file_content),
             mimetype=content_type,
-            resumable=True
+            resumable=True,
+            chunksize=upload_chunk_size
         )
         
         uploaded_file = service.files().create(
@@ -1797,6 +1814,164 @@ async def batch_operations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch operation failed: {str(e)}")
 
+@app.post("/upload-large")
+async def upload_large_file(
+    file: UploadFile = File(...),
+    folder_id: Optional[str] = Form(None),
+    use_personal_drive: bool = Form(False),
+    drive_id: str = Form("drive_1"),
+    overwrite: bool = Form(False),
+    current_user: str = Depends(get_current_user)
+):
+    """Optimized upload for large files with better chunking and progress tracking"""
+    # Check email verification for upload limits (manual signup users only)
+    if needs_email_verification(current_user):
+        user_data = get_user_from_firestore(current_user)
+        if user_data:
+            total_files = user_data.get('total_files', 0)
+            if total_files >= 2:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Email verification required. Unverified users can only upload 2 files. Please verify your email to upload more files."
+                )
+    
+    try:
+        # Validate file
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        # Choose service
+        if use_personal_drive:
+            service = get_user_google_service(current_user, drive_id)
+            if not service:
+                raise HTTPException(status_code=400, detail=f"Personal Google Drive {drive_id} not connected")
+            target_folder_id = folder_id or 'root'
+        else:
+            service = get_google_service()
+            if not service:
+                raise HTTPException(status_code=500, detail="Shared Google Drive not configured")
+            
+            user_data = get_user_from_firestore(current_user)
+            if not user_data:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            user_folder_id = user_data.get('folder_id')
+            if not user_folder_id:
+                user_folder_id = get_user_folder(service, current_user)
+                if not user_folder_id:
+                    raise HTTPException(status_code=500, detail="Failed to create user folder")
+                update_user_in_firestore(current_user, {'folder_id': user_folder_id})
+            target_folder_id = folder_id or user_folder_id
+        
+        # Read file content
+        file_content = await file.read()
+        if not file_content:
+            raise HTTPException(status_code=400, detail="File is empty")
+        
+        file_size = len(file_content)
+        print(f"Uploading large file: {file.filename} ({file_size} bytes)")
+        
+        # Check for existing file
+        existing_files = service.files().list(
+            q=f"name='{file.filename}' and '{target_folder_id}' in parents and trashed=false",
+            fields="files(id, name)"
+        ).execute().get('files', [])
+        
+        if existing_files and not overwrite:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "conflict": True,
+                    "type": "file",
+                    "name": file.filename,
+                    "message": f"File '{file.filename}' already exists. Do you want to overwrite it?",
+                    "existing_id": existing_files[0]['id']
+                }
+            )
+        elif existing_files and overwrite:
+            service.files().delete(fileId=existing_files[0]['id']).execute()
+        
+        # Determine MIME type
+        content_type = file.content_type
+        if not content_type or content_type == 'application/octet-stream':
+            import mimetypes
+            content_type, _ = mimetypes.guess_type(file.filename)
+            if not content_type:
+                content_type = 'application/octet-stream'
+        
+        file_metadata = {
+            'name': file.filename,
+            'parents': [target_folder_id],
+            'mimeType': content_type
+        }
+        
+        # Use optimized chunking for large files
+        upload_chunk_size = get_optimal_upload_chunk_size(file_size)
+        print(f"Using upload chunk size: {upload_chunk_size} bytes")
+        
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_content),
+            mimetype=content_type,
+            resumable=True,
+            chunksize=upload_chunk_size
+        )
+        
+        # Upload with progress tracking
+        request = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id,name,size,mimeType,createdTime'
+        )
+        
+        response = None
+        bytes_uploaded = 0
+        while response is None:
+            try:
+                status, response = request.next_chunk()
+                if status:
+                    bytes_uploaded = status.resumable_progress
+                    if file_size > 50 * 1024 * 1024 and bytes_uploaded % (10 * 1024 * 1024) == 0:
+                        progress = (bytes_uploaded / file_size) * 100 if file_size > 0 else 0
+                        print(f"Upload progress: {progress:.1f}% ({bytes_uploaded}/{file_size} bytes)")
+            except HttpError as e:
+                if e.resp.status == 404:
+                    # Upload was interrupted, restart
+                    print("Upload interrupted, restarting...")
+                    media = MediaIoBaseUpload(
+                        io.BytesIO(file_content),
+                        mimetype=content_type,
+                        resumable=True,
+                        chunksize=upload_chunk_size
+                    )
+                    request = service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id,name,size,mimeType,createdTime'
+                    )
+                else:
+                    raise
+        
+        print(f"Upload completed: {file.filename}")
+        
+        # Update user storage in real-time (only for shared drive)
+        if not use_personal_drive:
+            update_user_storage(current_user)
+        
+        # Update file count for unverified manual signup users
+        if needs_email_verification(current_user):
+            user_data = get_user_from_firestore(current_user)
+            if user_data:
+                new_count = user_data.get('total_files', 0) + 1
+                update_user_in_firestore(current_user, {'total_files': new_count})
+        
+        return FileInfo(**response)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Large file upload error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
 def get_drive_service(current_user: str, use_personal_drive: bool = False, drive_id: str = "drive_1"):
     """Unified service getter for both shared and personal drives"""
     if use_personal_drive:
@@ -1844,7 +2019,7 @@ async def stream_file(
     
     file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
     
-    def generate_stream():
+    def generate_optimized_stream():
         request = service.files().get_media(fileId=file_id)
         file_io = io.BytesIO()
         file_size = int(file_metadata.get('size', 0))
@@ -1852,15 +2027,26 @@ async def stream_file(
         downloader = MediaIoBaseDownload(file_io, request, chunksize=chunk_size)
         
         done = False
+        bytes_streamed = 0
         while not done:
-            status, done = downloader.next_chunk()
-            if status:
-                file_io.seek(0)
-                chunk = file_io.read()
-                if chunk:
-                    yield chunk
-                file_io.seek(0)
-                file_io.truncate(0)
+            try:
+                status, done = downloader.next_chunk()
+                if status:
+                    file_io.seek(0)
+                    chunk = file_io.read()
+                    if chunk:
+                        bytes_streamed += len(chunk)
+                        yield chunk
+                    file_io.seek(0)
+                    file_io.truncate(0)
+                    
+                    # Progress logging for large files
+                    if file_size > 50 * 1024 * 1024 and bytes_streamed % (20 * 1024 * 1024) == 0:
+                        progress = (bytes_streamed / file_size) * 100 if file_size > 0 else 0
+                        print(f"Stream progress: {progress:.1f}% ({bytes_streamed}/{file_size} bytes)")
+            except Exception as e:
+                print(f"Stream error: {str(e)}")
+                break
     
     # Sanitize filename for headers
     import re
@@ -1869,14 +2055,18 @@ async def stream_file(
     if not safe_filename or safe_filename.strip() == '':
         safe_filename = 'file'
     
+    file_size = int(file_metadata.get('size', 0))
+    headers = {
+        'Content-Disposition': f'inline; filename="{safe_filename}"',
+        'Cache-Control': 'public, max-age=3600',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': str(file_size)
+    }
+    
     return StreamingResponse(
-        generate_stream(),
+        generate_optimized_stream(),
         media_type=file_metadata.get('mimeType', 'application/octet-stream'),
-        headers={
-            'Content-Disposition': f'inline; filename="{safe_filename}"',
-            'Cache-Control': 'public, max-age=3600',
-            'Accept-Ranges': 'bytes'
-        }
+        headers=headers
     )
 
 @app.post("/batch-stream-setup")
@@ -1903,13 +2093,107 @@ async def setup_batch_streaming(
         "total_files": len(file_ids)
     }
 
+@app.post("/batch-large-files")
+async def batch_large_file_operations(
+    operation_type: str = Form(...),  # "upload" or "download"
+    file_ids: Optional[List[str]] = Form(None),  # For downloads
+    files: Optional[List[UploadFile]] = File(None),  # For uploads
+    folder_id: Optional[str] = Form(None),
+    use_personal_drive: bool = Form(False),
+    drive_id: str = Form("drive_1"),
+    current_user: str = Depends(get_current_user)
+):
+    """Handle batch operations for large files with optimized performance"""
+    try:
+        service = get_drive_service(current_user, use_personal_drive, drive_id)
+        if not service:
+            raise HTTPException(status_code=400, detail="Google Drive service not available")
+        
+        if operation_type == "upload" and files:
+            # Handle batch upload of large files
+            from parallel_api import batch_upload_large_files
+            
+            # Prepare file data
+            files_data = []
+            for file in files:
+                if file.filename:
+                    file_content = await file.read()
+                    file_size = len(file_content)
+                    
+                    # Determine target folder
+                    if use_personal_drive:
+                        target_folder = folder_id or 'root'
+                    else:
+                        user_data = get_user_from_firestore(current_user)
+                        if not user_data:
+                            continue
+                        user_folder_id = user_data.get('folder_id')
+                        if not user_folder_id:
+                            user_folder_id = get_user_folder(service, current_user)
+                            update_user_in_firestore(current_user, {'folder_id': user_folder_id})
+                        target_folder = folder_id or user_folder_id
+                    
+                    # Determine MIME type
+                    content_type = file.content_type
+                    if not content_type or content_type == 'application/octet-stream':
+                        import mimetypes
+                        content_type, _ = mimetypes.guess_type(file.filename)
+                        if not content_type:
+                            content_type = 'application/octet-stream'
+                    
+                    files_data.append({
+                        'data': file_content,
+                        'metadata': {
+                            'name': file.filename,
+                            'parents': [target_folder],
+                            'mimeType': content_type
+                        }
+                    })
+                    
+                    print(f"Prepared large file for batch upload: {file.filename} ({file_size} bytes)")
+            
+            results = await batch_upload_large_files(files_data, service)
+            
+            # Update storage for shared drive
+            if not use_personal_drive:
+                update_user_storage(current_user)
+            
+            return {
+                "success": True,
+                "operation": "batch_upload",
+                "results": results,
+                "total_files": len(files_data)
+            }
+            
+        elif operation_type == "download" and file_ids:
+            # Handle batch download setup for large files
+            from parallel_api import batch_download_large_files
+            
+            results = await batch_download_large_files(file_ids, service)
+            
+            return {
+                "success": True,
+                "operation": "batch_download_setup",
+                "results": results,
+                "total_files": len(file_ids)
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail="Invalid operation type or missing required parameters")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Batch large file operation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Batch operation failed: {str(e)}")
+
 @app.get("/parallel-data")
 async def get_parallel_data(
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
     current_user: str = Depends(get_current_user)
 ):
-    """Get files, storage, and quota data in parallel"""
+    """Get files, storage, and quota data in parallel with optimized performance"""
     async def get_files_async():
         return await list_files(use_personal_drive, drive_id, current_user)
     
@@ -1925,20 +2209,103 @@ async def get_parallel_data(
         except:
             return None
     
-    # Run all operations in parallel
-    files_task = asyncio.create_task(get_files_async())
-    storage_task = asyncio.create_task(get_storage_async())
-    quota_task = asyncio.create_task(get_quota_async())
-    
-    files, storage, quota = await asyncio.gather(
-        files_task, storage_task, quota_task, return_exceptions=True
-    )
-    
-    return {
-        "files": files if not isinstance(files, Exception) else [],
-        "storage": storage if not isinstance(storage, Exception) else None,
-        "quota": quota if not isinstance(quota, Exception) else None
-    }
+    # Run all operations in parallel with timeout
+    try:
+        files_task = asyncio.create_task(get_files_async())
+        storage_task = asyncio.create_task(get_storage_async())
+        quota_task = asyncio.create_task(get_quota_async())
+        
+        files, storage, quota = await asyncio.wait_for(
+            asyncio.gather(files_task, storage_task, quota_task, return_exceptions=True),
+            timeout=30.0  # 30 second timeout
+        )
+        
+        return {
+            "files": files if not isinstance(files, Exception) else [],
+            "storage": storage if not isinstance(storage, Exception) else None,
+            "quota": quota if not isinstance(quota, Exception) else None,
+            "performance_optimized": True
+        }
+    except asyncio.TimeoutError:
+        return {
+            "files": [],
+            "storage": None,
+            "quota": None,
+            "error": "Request timeout - operations taking too long",
+            "performance_optimized": True
+        }
+
+@app.get("/files-fast")
+async def list_files_fast(
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    show_all: bool = False,
+    page_size: int = 100,
+    current_user: str = Depends(get_current_user)
+):
+    """Fast file listing with pagination and optimized queries for large directories"""
+    try:
+        service = get_drive_service(current_user, use_personal_drive, drive_id)
+        if not service:
+            return {"files": [], "total": 0, "page_size": page_size}
+        
+        # Determine query based on drive type
+        if use_personal_drive:
+            if show_all:
+                folder_query = "trashed=false"
+            else:
+                folder_query = "'root' in parents and trashed=false"
+        else:
+            user_data = get_user_from_firestore(current_user)
+            if not user_data:
+                return {"files": [], "total": 0, "page_size": page_size}
+            
+            user_folder_id = user_data.get('folder_id')
+            if not user_folder_id:
+                user_folder_id = get_user_folder(service, current_user)
+                if user_folder_id:
+                    update_user_in_firestore(current_user, {'folder_id': user_folder_id})
+                else:
+                    return {"files": [], "total": 0, "page_size": page_size}
+            
+            folder_query = f"'{user_folder_id}' in parents and trashed=false"
+        
+        # Optimized query with pagination
+        results = service.files().list(
+            q=folder_query,
+            fields="files(id,name,size,mimeType,createdTime,parents)",
+            pageSize=min(page_size, 1000),  # Limit to prevent timeouts
+            orderBy="createdTime desc"  # Show newest first
+        ).execute()
+        
+        files = results.get('files', [])
+        
+        # Process files efficiently
+        processed_files = []
+        for file in files:
+            # Skip folder size calculation for performance
+            if file.get('mimeType') == 'application/vnd.google-apps.folder':
+                file['size'] = 0
+            
+            processed_files.append({
+                "id": file.get('id'),
+                "name": file.get('name'),
+                "size": int(file.get('size', 0)),
+                "mimeType": file.get('mimeType'),
+                "createdTime": file.get('createdTime'),
+                "isFolder": file.get('mimeType') == 'application/vnd.google-apps.folder'
+            })
+        
+        return {
+            "files": processed_files,
+            "total": len(processed_files),
+            "page_size": page_size,
+            "optimized": True
+        }
+        
+    except Exception as e:
+        print(f"Fast file listing error: {str(e)}")
+        return {"files": [], "total": 0, "page_size": page_size, "error": str(e)}
 
 @app.get("/files", response_model=List[FileInfo])
 async def list_files(
@@ -2232,6 +2599,93 @@ async def preview_file(
         print(f"Preview error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
+@app.get("/download-large/{file_id}")
+async def download_large_file(
+    file_id: str, 
+    use_personal_drive: bool = False,
+    drive_id: str = "drive_1",
+    current_user: Optional[str] = Depends(get_optional_current_user)
+):
+    """Optimized download for large files with better streaming and progress tracking"""
+    try:
+        if use_personal_drive and not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
+        
+        service = get_drive_service(current_user or '', use_personal_drive, drive_id)
+        if not service:
+            drive_type = "Personal" if use_personal_drive else "Shared"
+            raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
+        
+        file_metadata = service.files().get(fileId=file_id, fields='id,name,mimeType,size').execute()
+        file_size = int(file_metadata.get('size', 0))
+        
+        print(f"Starting large file download: {file_metadata.get('name')} ({file_size} bytes)")
+        
+        def generate_optimized_stream():
+            request = service.files().get_media(fileId=file_id)
+            file_io = io.BytesIO()
+            chunk_size = get_optimal_chunk_size(file_size)
+            downloader = MediaIoBaseDownload(file_io, request, chunksize=chunk_size)
+            
+            done = False
+            bytes_downloaded = 0
+            while not done:
+                try:
+                    status, done = downloader.next_chunk()
+                    if status:
+                        file_io.seek(0)
+                        chunk = file_io.read()
+                        if chunk:
+                            bytes_downloaded += len(chunk)
+                            yield chunk
+                        file_io.seek(0)
+                        file_io.truncate(0)
+                        
+                        # Progress logging for large files
+                        if file_size > 50 * 1024 * 1024 and bytes_downloaded % (20 * 1024 * 1024) == 0:
+                            progress = (bytes_downloaded / file_size) * 100 if file_size > 0 else 0
+                            print(f"Download progress: {progress:.1f}% ({bytes_downloaded}/{file_size} bytes)")
+                except Exception as e:
+                    print(f"Download stream error: {str(e)}")
+                    break
+            
+            print(f"Download completed: {file_metadata.get('name')}")
+        
+        filename = file_metadata.get('name', 'file')
+        file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
+        
+        # Sanitize filename
+        import re
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
+        if not safe_filename or safe_filename.strip() == '':
+            safe_filename = f'file.{file_extension}' if file_extension else 'file'
+        
+        # Enhanced headers for large file downloads
+        headers = {
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Cache-Control": "public, max-age=3600",
+            "Accept-Ranges": "bytes",
+            "Connection": "keep-alive",
+            "Content-Length": str(file_size)
+        }
+        
+        # Add transfer encoding for very large files
+        if file_size > 100 * 1024 * 1024:
+            headers["Transfer-Encoding"] = "chunked"
+        
+        return StreamingResponse(
+            generate_optimized_stream(),
+            media_type='application/octet-stream',
+            headers=headers
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Large file download error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
 @app.get("/download/{file_id}")
 async def download_file(
     file_id: str, 
@@ -2377,16 +2831,24 @@ async def download_file(
         proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
         
         file_size = int(file_metadata.get('size', 0))
+        
+        # Enhanced headers for better download performance
+        headers = {
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Cache-Control": "public, max-age=3600",
+            "Accept-Ranges": "bytes",
+            "Connection": "keep-alive",
+            "Content-Length": str(file_size),
+            "Transfer-Encoding": "chunked" if file_size > 50 * 1024 * 1024 else None
+        }
+        
+        # Remove None values
+        headers = {k: v for k, v in headers.items() if v is not None}
+        
         return StreamingResponse(
             generate_stream(),
             media_type=proper_mime_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{safe_filename}"',
-                "Cache-Control": "public, max-age=3600",
-                "Accept-Ranges": "bytes",
-                "Connection": "keep-alive",
-                "Content-Length": str(file_size)
-            }
+            headers=headers
         )
         
     except HttpError as e:
