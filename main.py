@@ -840,6 +840,37 @@ async def check_github_linked(githubEmail: str):
     except Exception as e:
         return {"exists": False}
 
+class GitHubValidateRequest(BaseModel):
+    githubEmail: str
+    githubUid: str
+
+@app.post("/validate-github-account")
+async def validate_github_account(request: GitHubValidateRequest, current_user: str = Depends(get_current_user)):
+    """Validate if GitHub account still exists"""
+    try:
+        # Try to get Firebase user to check if GitHub provider is still valid
+        firebase_user = auth.get_user(request.githubUid)
+        
+        # Check if GitHub is still in provider data
+        github_provider_found = False
+        for provider in firebase_user.provider_data:
+            if provider.provider_id == 'github.com':
+                github_provider_found = True
+                break
+        
+        if not github_provider_found:
+            return {"valid": False}
+        
+        # Additional check: verify the email matches
+        if firebase_user.email != request.githubEmail:
+            return {"valid": False}
+            
+        return {"valid": True}
+        
+    except Exception as e:
+        print(f"GitHub validation error: {str(e)}")
+        return {"valid": False}
+
 @app.post("/register-user")
 async def register_user(user_data: UserCreate, current_user: Optional[str] = Depends(get_optional_current_user)):
     """Register a new user in the database"""
