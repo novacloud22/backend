@@ -296,6 +296,13 @@ def get_user_drive_tokens_from_firestore(user_email: str):
     except Exception as e:
         print(f"Error getting tokens from Firestore: {str(e)}")
         return {}
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+        return {}
+    except Exception as e:
+        print(f"Error getting tokens from Firestore: {str(e)}")
+        return {}
 
 def save_user_drive_tokens_to_firestore(user_email: str, tokens_data: dict):
     """Save user drive tokens to Firestore"""
@@ -672,6 +679,7 @@ async def link_google_account(link_data: GoogleLinkRequest, current_user: str = 
         
         if existing_users:
             existing_user_data = existing_users[0].to_dict()
+            if existing_user_data.get('email') != current_user:
                 raise HTTPException(status_code=409, detail="Google account already linked to another user")
         
         # Update current user with Google account info
@@ -688,8 +696,7 @@ async def link_google_account(link_data: GoogleLinkRequest, current_user: str = 
         }
         
         # Use appropriate document ID based on user type
-        else:
-            doc_ref = db.collection('users').document(current_user)
+        doc_ref = db.collection('users').document(current_user)
         
         doc_ref.update(updates)
         
@@ -721,8 +728,7 @@ async def unlink_google_account(current_user: str = Depends(get_current_user)):
         }
         
         # Use appropriate document ID based on user type
-        else:
-            doc_ref = db.collection('users').document(current_user)
+        doc_ref = db.collection('users').document(current_user)
         
         doc_ref.update(updates)
         
@@ -763,6 +769,7 @@ async def link_github_account(link_data: GithubLinkRequest, current_user: str = 
         
         if existing_users:
             existing_user_data = existing_users[0].to_dict()
+            if existing_user_data.get('email') != current_user:
                 raise HTTPException(status_code=409, detail="GitHub account already linked to another user")
         
         user_data = get_user_from_firestore(current_user)
@@ -776,8 +783,7 @@ async def link_github_account(link_data: GithubLinkRequest, current_user: str = 
             'github_linked_at': datetime.utcnow().isoformat()
         }
         
-        else:
-            doc_ref = db.collection('users').document(current_user)
+        doc_ref = db.collection('users').document(current_user)
         
         doc_ref.update(updates)
         return {"message": "GitHub account linked successfully"}
@@ -805,8 +811,7 @@ async def unlink_github_account(current_user: str = Depends(get_current_user)):
             'github_unlinked_at': datetime.utcnow().isoformat()
         }
         
-        else:
-            doc_ref = db.collection('users').document(current_user)
+        doc_ref = db.collection('users').document(current_user)
         
         doc_ref.update(updates)
         return {"message": "GitHub account unlinked successfully"}
@@ -2700,6 +2705,7 @@ async def set_password_for_oauth_user(
     
     try:
         # Hash the password
+        import bcrypt
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
         
         # Update user with hashed password
@@ -2708,8 +2714,7 @@ async def set_password_for_oauth_user(
             'password_set_at': datetime.utcnow().isoformat()
         }
         
-        else:
-            doc_ref = db.collection('users').document(current_user)
+        doc_ref = db.collection('users').document(current_user)
         
         doc_ref.update(updates)
         
