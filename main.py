@@ -20,6 +20,7 @@ from io import BytesIO
 import secrets
 import hashlib
 import threading
+import bcrypt
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -130,6 +131,26 @@ class UserCreate(BaseModel):
     phone: Optional[str] = None
     organization: Optional[str] = None
 
+class PhoneSignUp(BaseModel):
+    phone: str
+    password: str
+    name: str
+
+class PhoneSignIn(BaseModel):
+    phone: str
+    password: str
+
+class GoogleLinkRequest(BaseModel):
+    googleEmail: str
+    googleName: str
+
+class GithubLinkRequest(BaseModel):
+    githubEmail: str
+    githubName: str
+
+class PhoneLinkRequest(BaseModel):
+    phone: str
+
 class UserProfile(BaseModel):
     email: str
     name: str
@@ -142,6 +163,11 @@ class UserProfile(BaseModel):
     last_login: Optional[str] = None
     google_connected: bool
     personal_drive_connected: bool = False
+    google_email: Optional[str] = None
+    github_email: Optional[str] = None
+    phone_linked: Optional[str] = None
+    auth_method: Optional[str] = None
+    has_password: bool = False
 
 class Token(BaseModel):
     access_token: str
@@ -192,24 +218,31 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         # Verify Firebase ID token
         decoded_token = auth.verify_id_token(credentials.credentials)
         email = decoded_token.get('email')
+        phone = decoded_token.get('phone_number')
         uid = decoded_token.get('uid')
         
-        if not email:
-            raise HTTPException(status_code=401, detail="Email not found in token")
+        # Determine user identifier (email or phone)
+        user_identifier = email
+        if not email and phone:
+            user_identifier = phone
+        elif not email:
+            raise HTTPException(status_code=401, detail="No email or phone found in token")
         
-        print(f"Authenticated user: {email} (UID: {uid})")
+        print(f"Authenticated user: {user_identifier} (UID: {uid})")
         
         # Ensure user exists in Firestore
-        user_data = get_user_from_firestore(email)
+        user_data = get_user_from_firestore(user_identifier)
         if not user_data:
-            print(f"User {email} not found in Firestore, creating record")
+            print(f"User {user_identifier} not found in Firestore, creating record")
             # Auto-create user record if missing
             try:
                 firebase_user = auth.get_user(uid)
                 new_user = {
-                    "email": email,
+                    "email": email or f"{phone.replace('+', '').replace(' ', '')}@phone.novacloud.temp",
+                    "phone": phone,
                     "name": firebase_user.display_name or "User",
                     "uid": uid,
+                    "auth_method": "phone" if phone and not email else "email",
                     "created_at": datetime.utcnow().isoformat(),
                     "storage_used": 0,
                     "total_files": 0,
@@ -217,12 +250,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                     "last_login": datetime.utcnow().isoformat(),
                     "folder_id": None
                 }
-                save_user_to_firestore(email, new_user)
-                print(f"Auto-created user record for {email}")
+                save_user_to_firestore(user_identifier, new_user)
+                print(f"Auto-created user record for {user_identifier}")
             except Exception as create_error:
                 print(f"Failed to auto-create user record: {str(create_error)}")
         
-        return email
+        return user_identifier
     except Exception as e:
         print(f"Auth Error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
@@ -292,33 +325,50 @@ def save_user_drive_tokens_to_firestore(user_email: str, tokens_data: dict):
         print(f"Error saving tokens to Firestore: {str(e)}")
 
 # Firestore user management functions
-def get_user_from_firestore(user_email: str):
-    """Get user data from Firestore"""
+def get_user_from_firestore(user_identifier: str):
+    """Get user data from Firestore by email or phone"""
     if not db:
         return None
     try:
-        doc_ref = db.collection('users').document(user_email)
+        # First try by email/identifier
+        doc_ref = db.collection('users').document(user_identifier)
         doc = doc_ref.get()
-        return doc.to_dict() if doc.exists else None
+        if doc.exists:
+            return doc.to_dict()
+        
+        # If not found and looks like phone number, try phone field search
+        if user_identifier.startswith('+'):
+            users_ref = db.collection('users')
+            query = users_ref.where('phone', '==', user_identifier).limit(1)
+            docs = list(query.stream())
+            if docs:
+                return docs[0].to_dict()
+        
+        return None
     except Exception as e:
         print(f"Error getting user from Firestore: {str(e)}")
         return None
 
-def save_user_to_firestore(user_email: str, user_data: dict, overwrite: bool = False):
+def save_user_to_firestore(user_identifier: str, user_data: dict, overwrite: bool = False):
     """Save user data to Firestore"""
     if not db:
-        print(f"Firestore not available, cannot save user {user_email}")
+        print(f"Firestore not available, cannot save user {user_identifier}")
         return False
     try:
-        doc_ref = db.collection('users').document(user_email)
+        # For phone users, use phone as document ID
+        if user_data.get('auth_method') == 'phone' and user_data.get('phone'):
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(user_identifier)
+            
         if overwrite:
             # Completely overwrite existing data
             doc_ref.set(user_data)
-            print(f"Successfully overwritten user {user_email} in Firestore")
+            print(f"Successfully overwritten user {user_identifier} in Firestore")
         else:
             # Merge with existing data
             doc_ref.set(user_data, merge=True)
-            print(f"Successfully saved user {user_email} to Firestore")
+            print(f"Successfully saved user {user_identifier} to Firestore")
         return True
     except Exception as e:
         print(f"Error saving user to Firestore: {str(e)}")
@@ -336,16 +386,29 @@ def update_user_in_firestore(user_email: str, updates: dict):
         print(f"Error updating user in Firestore: {str(e)}")
         return False
 
-def check_user_exists_in_firestore(user_email: str):
-    """Check if user exists in Firestore"""
+def check_user_exists_in_firestore(user_identifier: str):
+    """Check if user exists in Firestore by email or phone"""
     if not db:
         return False
     try:
-        doc_ref = db.collection('users').document(user_email)
+        # First try by email/identifier
+        doc_ref = db.collection('users').document(user_identifier)
         doc = doc_ref.get()
-        exists = doc.exists
-        print(f"Firestore check for {user_email}: {exists}")
-        return exists
+        if doc.exists:
+            print(f"Firestore check for {user_identifier}: True")
+            return True
+        
+        # If not found and looks like phone number, try phone field search
+        if user_identifier.startswith('+'):
+            users_ref = db.collection('users')
+            query = users_ref.where('phone', '==', user_identifier).limit(1)
+            docs = list(query.stream())
+            exists = len(docs) > 0
+            print(f"Firestore phone check for {user_identifier}: {exists}")
+            return exists
+        
+        print(f"Firestore check for {user_identifier}: False")
+        return False
     except Exception as e:
         print(f"Error checking user existence: {str(e)}")
         return False
@@ -622,6 +685,370 @@ async def check_user_exists(email: str):
         "firestore_exists": firestore_exists,
         "firebase_exists": firebase_exists
     }
+
+@app.post("/check-phone-user-exists")
+async def check_phone_user_exists(phone: str):
+    """Check if user exists with phone number"""
+    if not db:
+        return {"exists": False}
+    
+    try:
+        # Check in Firestore for phone number
+        users_ref = db.collection('users')
+        query = users_ref.where('phone', '==', phone).limit(1)
+        docs = list(query.stream())
+        
+        return {"exists": len(docs) > 0}
+    except Exception as e:
+        print(f"Error checking phone user: {str(e)}")
+        return {"exists": False}
+
+@app.post("/phone-signup")
+async def phone_signup(signup_data: PhoneSignUp):
+    """Register user with phone number"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        # Check if phone already exists
+        users_ref = db.collection('users')
+        query = users_ref.where('phone', '==', signup_data.phone).limit(1)
+        existing_users = list(query.stream())
+        
+        if existing_users:
+            raise HTTPException(status_code=409, detail="Phone number already registered")
+        
+        # Hash password
+        hashed_password = bcrypt.hashpw(signup_data.password.encode('utf-8'), bcrypt.gensalt())
+        
+        # Create Firebase user with phone as email (temporary)
+        temp_email = f"{signup_data.phone.replace('+', '').replace(' ', '')}@phone.novacloud.temp"
+        
+        try:
+            firebase_user = auth.create_user(
+                email=temp_email,
+                password=signup_data.password,
+                display_name=signup_data.name,
+                phone_number=signup_data.phone
+            )
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                raise HTTPException(status_code=409, detail="Phone number already registered")
+            raise HTTPException(status_code=500, detail="Failed to create user account")
+        
+        # Save user data to Firestore
+        user_data = {
+            "email": temp_email,
+            "phone": signup_data.phone,
+            "name": signup_data.name,
+            "uid": firebase_user.uid,
+            "hashed_password": hashed_password.decode('utf-8'),
+            "auth_method": "phone",
+            "created_at": datetime.utcnow().isoformat(),
+            "storage_used": 0,
+            "total_files": 0,
+            "total_folders": 0,
+            "last_login": datetime.utcnow().isoformat(),
+            "folder_id": None
+        }
+        
+        # Use phone as document ID for phone users
+        doc_ref = db.collection('users').document(signup_data.phone)
+        doc_ref.set(user_data)
+        
+        # Create custom token for immediate sign-in
+        custom_token = auth.create_custom_token(firebase_user.uid)
+        
+        return {
+            "success": True,
+            "message": "Account created successfully",
+            "customToken": custom_token.decode('utf-8')
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Phone signup error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+@app.post("/phone-login")
+async def phone_login(login_data: PhoneSignIn):
+    """Login user with phone number and password"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        # Get user data from Firestore
+        doc_ref = db.collection('users').document(login_data.phone)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        user_data = doc.to_dict()
+        
+        # Verify password
+        if not bcrypt.checkpw(login_data.password.encode('utf-8'), user_data['hashed_password'].encode('utf-8')):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        
+        # Update last login
+        doc_ref.update({"last_login": datetime.utcnow().isoformat()})
+        
+        # Create custom token for sign-in
+        custom_token = auth.create_custom_token(user_data['uid'])
+        
+        return {
+            "success": True,
+            "message": "Login successful",
+            "customToken": custom_token.decode('utf-8')
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Phone login error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+@app.post("/link-google-account")
+async def link_google_account(link_data: GoogleLinkRequest, current_user: str = Depends(get_current_user)):
+    """Link Google account to existing user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        # Check if Google email is already linked to another account
+        users_ref = db.collection('users')
+        query = users_ref.where('google_email', '==', link_data.googleEmail).limit(1)
+        existing_users = list(query.stream())
+        
+        if existing_users:
+            existing_user_data = existing_users[0].to_dict()
+            if existing_user_data.get('email') != current_user and existing_user_data.get('phone') != current_user:
+                raise HTTPException(status_code=409, detail="Google account already linked to another user")
+        
+        # Update current user with Google account info
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Update user data with Google info
+        updates = {
+            'google_email': link_data.googleEmail,
+            'google_name': link_data.googleName,
+            'google_linked': True,
+            'google_linked_at': datetime.utcnow().isoformat()
+        }
+        
+        # Use appropriate document ID based on user type
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        
+        return {"message": "Google account linked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Google link error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to link Google account")
+
+@app.post("/unlink-google-account")
+async def unlink_google_account(current_user: str = Depends(get_current_user)):
+    """Unlink Google account from user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Remove Google account info
+        updates = {
+            'google_email': None,
+            'google_name': None,
+            'google_linked': False,
+            'google_unlinked_at': datetime.utcnow().isoformat()
+        }
+        
+        # Use appropriate document ID based on user type
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        
+        return {"message": "Google account unlinked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Google unlink error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to unlink Google account")
+
+@app.post("/check-google-linked")
+async def check_google_linked(googleEmail: str):
+    """Check if Google email is linked to any user account"""
+    if not db:
+        return {"exists": False}
+    
+    try:
+        users_ref = db.collection('users')
+        query = users_ref.where('google_email', '==', googleEmail).limit(1)
+        docs = list(query.stream())
+        
+        return {"exists": len(docs) > 0}
+    except Exception as e:
+        print(f"Error checking Google linked: {str(e)}")
+        return {"exists": False}
+
+@app.post("/link-github-account")
+async def link_github_account(link_data: GithubLinkRequest, current_user: str = Depends(get_current_user)):
+    """Link GitHub account to existing user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        users_ref = db.collection('users')
+        query = users_ref.where('github_email', '==', link_data.githubEmail).limit(1)
+        existing_users = list(query.stream())
+        
+        if existing_users:
+            existing_user_data = existing_users[0].to_dict()
+            if existing_user_data.get('email') != current_user and existing_user_data.get('phone') != current_user:
+                raise HTTPException(status_code=409, detail="GitHub account already linked to another user")
+        
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updates = {
+            'github_email': link_data.githubEmail,
+            'github_name': link_data.githubName,
+            'github_linked': True,
+            'github_linked_at': datetime.utcnow().isoformat()
+        }
+        
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        return {"message": "GitHub account linked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to link GitHub account")
+
+@app.post("/unlink-github-account")
+async def unlink_github_account(current_user: str = Depends(get_current_user)):
+    """Unlink GitHub account from user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updates = {
+            'github_email': None,
+            'github_name': None,
+            'github_linked': False,
+            'github_unlinked_at': datetime.utcnow().isoformat()
+        }
+        
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        return {"message": "GitHub account unlinked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to unlink GitHub account")
+
+@app.post("/link-phone-account")
+async def link_phone_account(link_data: PhoneLinkRequest, current_user: str = Depends(get_current_user)):
+    """Link phone number to existing user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updates = {
+            'phone_linked': link_data.phone,
+            'phone_linked_at': datetime.utcnow().isoformat()
+        }
+        
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        return {"message": "Phone number linked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to link phone number")
+
+@app.post("/unlink-phone-account")
+async def unlink_phone_account(current_user: str = Depends(get_current_user)):
+    """Unlink phone number from user"""
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        user_data = get_user_from_firestore(current_user)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updates = {
+            'phone_linked': None,
+            'phone_unlinked_at': datetime.utcnow().isoformat()
+        }
+        
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        return {"message": "Phone number unlinked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to unlink phone number")
+
+@app.post("/check-github-linked")
+async def check_github_linked(githubEmail: str):
+    """Check if GitHub email is linked to any user account"""
+    if not db:
+        return {"exists": False}
+    
+    try:
+        users_ref = db.collection('users')
+        query = users_ref.where('github_email', '==', githubEmail).limit(1)
+        docs = list(query.stream())
+        
+        return {"exists": len(docs) > 0}
+    except Exception as e:
+        return {"exists": False}
 
 @app.post("/register-user")
 async def register_user(user_data: UserCreate):
@@ -1751,6 +2178,20 @@ async def preview_file(
         if use_personal_drive and not current_user:
             raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
         
+        # Check if browser Google account matches NovaCloud account
+        if use_personal_drive and current_user:
+            service = get_user_google_service(current_user, drive_id)
+            if service:
+                try:
+                    about = service.about().get(fields="user").execute()
+                    google_email = about.get('user', {}).get('emailAddress')
+                    if google_email and google_email != current_user:
+                        raise HTTPException(status_code=403, detail=f"Browser logged into {google_email} but NovaCloud expects {current_user}. Please switch Google accounts.")
+                except Exception as e:
+                    if "Browser logged into" in str(e):
+                        raise
+                    raise HTTPException(status_code=401, detail="Personal drive authentication failed")
+        
         service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
             drive_type = "Personal" if use_personal_drive else "Shared"
@@ -1850,6 +2291,20 @@ async def download_file(
         # For personal drive, authentication is required
         if use_personal_drive and not current_user:
             raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
+        
+        # Check if browser Google account matches NovaCloud account
+        if use_personal_drive and current_user:
+            service = get_user_google_service(current_user, drive_id)
+            if service:
+                try:
+                    about = service.about().get(fields="user").execute()
+                    google_email = about.get('user', {}).get('emailAddress')
+                    if google_email and google_email != current_user:
+                        raise HTTPException(status_code=403, detail=f"Browser logged into {google_email} but NovaCloud expects {current_user}. Please switch Google accounts.")
+                except Exception as e:
+                    if "Browser logged into" in str(e):
+                        raise
+                    raise HTTPException(status_code=401, detail="Personal drive authentication failed")
         
         service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
@@ -2397,6 +2852,13 @@ async def get_profile(current_user: str = Depends(get_current_user)):
         for drive_id in user_tokens
     )
     
+    # Add linked account information
+    user_data["google_email"] = user_data.get('google_email')
+    user_data["github_email"] = user_data.get('github_email')
+    user_data["phone_linked"] = user_data.get('phone_linked')
+    user_data["auth_method"] = user_data.get('auth_method', 'email')
+    user_data["has_password"] = bool(user_data.get('hashed_password'))
+    
     return UserProfile(**user_data)
 
 @app.put("/user/profile")
@@ -2443,6 +2905,49 @@ async def update_phone(
         raise HTTPException(status_code=500, detail="Failed to update phone")
     
     return {"message": "Phone updated successfully", "phone": phone}
+
+@app.post("/user/set-password")
+async def set_password_for_oauth_user(
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    current_user: str = Depends(get_current_user)
+):
+    """Set password for OAuth users (Google/GitHub) to enable email+password login"""
+    if password != confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    
+    user_data = get_user_from_firestore(current_user)
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if user already has a password
+    if user_data.get('hashed_password'):
+        raise HTTPException(status_code=400, detail="User already has a password set")
+    
+    try:
+        # Hash the password
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        
+        # Update user with hashed password
+        updates = {
+            'hashed_password': hashed_password.decode('utf-8'),
+            'password_set_at': datetime.utcnow().isoformat()
+        }
+        
+        if user_data.get('auth_method') == 'phone':
+            doc_ref = db.collection('users').document(user_data['phone'])
+        else:
+            doc_ref = db.collection('users').document(current_user)
+        
+        doc_ref.update(updates)
+        
+        return {"message": "Password set successfully. You can now sign in with email and password."}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to set password")
 
 @app.post("/user/email/change-request")
 async def request_email_change(
