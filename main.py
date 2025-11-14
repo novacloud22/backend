@@ -1814,10 +1814,14 @@ async def download_file(
     file_id: str, 
     use_personal_drive: bool = False,
     drive_id: str = "drive_1",
-    current_user: str = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_current_user)
 ):
     try:
-        service = get_drive_service(current_user, use_personal_drive, drive_id)
+        # For personal drive, authentication is required
+        if use_personal_drive and not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for personal drive access")
+        
+        service = get_drive_service(current_user or '', use_personal_drive, drive_id)
         if not service:
             drive_type = "Personal" if use_personal_drive else "Shared"
             raise HTTPException(status_code=400, detail=f"{drive_type} Google Drive not available")
