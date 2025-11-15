@@ -39,14 +39,15 @@ class OptimizedUploadProcessor:
     Optimized upload processor for handling large batches of files
     """
     
-    def __init__(self, max_workers: int = 5, chunk_size: int = 10):
+    def __init__(self, max_workers: int = 3, chunk_size: int = 5):
         self.max_workers = max_workers
         self.chunk_size = chunk_size
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.semaphore = asyncio.Semaphore(max_workers)
         self.active_uploads = weakref.WeakSet()
+        self.progress_file = "upload_progress.json"
         
-        # Set very long timeout for reliability
+        # Set very long timeout for large files
         import socket
         socket.setdefaulttimeout(600)  # 10 minutes
         
@@ -80,9 +81,12 @@ class OptimizedUploadProcessor:
             # Force garbage collection between chunks
             gc.collect()
             
+            # Save progress after each chunk
+            self._save_progress(chunk_idx + 1, len(chunks), all_results)
+            
             # Longer delay to prevent overwhelming
             if chunk_idx < len(chunks) - 1:
-                await asyncio.sleep(5.0)  # 5 seconds
+                await asyncio.sleep(8.0)  # 8 seconds for large files
         
         # Calculate statistics
         successful = sum(1 for r in all_results if r.success)
@@ -150,18 +154,28 @@ class OptimizedUploadProcessor:
             start_time = time.time()
             
             try:
-                # Read file content efficiently
-                file_content = await file.read()
-                file_size = len(file_content)
+                # Handle large files without loading all into memory
+                file_size = file.size if hasattr(file, 'size') else 0
                 
-                # Reset file position for potential reuse
-                await file.seek(0)
+                # For files >100MB, use streaming to avoid memory issues
+                if file_size > 100 * 1024 * 1024:
+                    # Stream large files
+                    media = self._create_streaming_media(file)
+                else:
+                    # Read smaller files into memory
+                    file_content = await file.read()
+                    file_size = len(file_content)
+                    await file.seek(0)
+                    
+                    media = MediaIoBaseUpload(
+                        io.BytesIO(file_content),
+                        mimetype=file.content_type or 'application/octet-stream',
+                        resumable=True,
+                        chunksize=self._get_optimal_chunk_size(file_size)
+                    )
                 
                 # Skip existing file check to avoid SSL errors
                 # Files will be overwritten if they exist
-                
-                # Determine optimal chunk size based on file size
-                chunk_size = self._get_optimal_chunk_size(file_size)
                 
                 # Prepare file metadata
                 file_metadata = {
@@ -169,14 +183,6 @@ class OptimizedUploadProcessor:
                     'parents': [target_folder_id],
                     'mimeType': file.content_type or 'application/octet-stream'
                 }
-                
-                # Create media upload with optimized settings
-                media = MediaIoBaseUpload(
-                    io.BytesIO(file_content),
-                    mimetype=file.content_type or 'application/octet-stream',
-                    resumable=True,
-                    chunksize=chunk_size
-                )
                 
                 # Upload file using thread executor to avoid blocking
                 upload_result = await asyncio.get_event_loop().run_in_executor(
@@ -253,6 +259,31 @@ class OptimizedUploadProcessor:
                 logger.warning(f"Error checking existing file {filename}: {str(e)}")
             return []
     
+    def _create_streaming_media(self, file: UploadFile):
+        """Create streaming media for large files"""
+        return MediaIoBaseUpload(
+            file.file,
+            mimetype=file.content_type or 'application/octet-stream',
+            resumable=True,
+            chunksize=32 * 1024 * 1024  # 32MB chunks for large files
+        )
+    
+    def _save_progress(self, current_chunk: int, total_chunks: int, results: List[UploadResult]):
+        """Save upload progress for resume capability"""
+        try:
+            import json
+            progress = {
+                "current_chunk": current_chunk,
+                "total_chunks": total_chunks,
+                "completed_files": [r.file_name for r in results if r.success],
+                "failed_files": [r.file_name for r in results if not r.success],
+                "timestamp": time.time()
+            }
+            with open(self.progress_file, 'w') as f:
+                json.dump(progress, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save progress: {e}")
+    
     def _get_optimal_chunk_size(self, file_size: int) -> int:
         """
         Get optimal chunk size based on file size for better upload performance
@@ -316,8 +347,8 @@ class ConnectionPool:
                 if len(self.connections) < self.max_connections:
                     self.connections.append(connection)
 
-# Global instances - Simple reliable settings
-upload_processor = OptimizedUploadProcessor(max_workers=3, chunk_size=10)
+# Global instances - Optimized for large files
+upload_processor = OptimizedUploadProcessor(max_workers=3, chunk_size=5)
 connection_pool = ConnectionPool(max_connections=5)
 
 # Utility functions for integration with main.py
