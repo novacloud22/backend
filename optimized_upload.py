@@ -18,6 +18,8 @@ from fastapi import UploadFile
 import io
 from googleapiclient.http import MediaIoBaseUpload
 from googleapiclient.errors import HttpError
+from ssl_fix import upload_with_retry, get_secure_drive_service
+import ssl
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -216,35 +218,23 @@ class OptimizedUploadProcessor:
         Execute the actual upload in a thread to avoid blocking
         """
         try:
-            # Use resumable upload for better reliability
-            request = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,name,size,mimeType,createdTime'
-            )
+            # Use SSL-safe upload with retry logic
+            return upload_with_retry(service, file_metadata, media, max_retries=3)
             
-            response = None
-            while response is None:
-                status, response = request.next_chunk()
-                if status:
-                    # Log progress for very large files
-                    if hasattr(media, '_size') and media._size > 100 * 1024 * 1024:
-                        progress = (status.resumable_progress / media._size) * 100
-                        if progress % 20 == 0:  # Log every 20%
-                            logger.info(f"Upload progress: {progress:.1f}%")
-            
-            return response
-            
+        except ssl.SSLError as e:
+            raise Exception(f"SSL connection error: {str(e)}")
         except HttpError as e:
-            if e.resp.status == 409:  # Conflict - file exists
+            if e.resp.status == 409:
                 raise Exception(f"File already exists: {file_metadata['name']}")
-            elif e.resp.status == 403:  # Forbidden
+            elif e.resp.status == 403:
                 raise Exception("Access denied - check permissions")
-            elif e.resp.status == 429:  # Rate limit
+            elif e.resp.status == 429:
                 raise Exception("Rate limit exceeded - please retry")
             else:
                 raise Exception(f"Google Drive API error: {e.resp.status}")
         except Exception as e:
+            if "SSL" in str(e).upper():
+                raise Exception(f"SSL connection error: {str(e)}")
             raise Exception(f"Upload error: {str(e)}")
     
     async def _check_existing_file(self, service, filename: str, folder_id: str) -> List:
@@ -261,8 +251,11 @@ class OptimizedUploadProcessor:
                 ).execute()
             )
             return results.get('files', [])
-        except Exception as e:
-            logger.warning(f"Error checking existing file {filename}: {str(e)}")
+        except (ssl.SSLError, Exception) as e:
+            if "SSL" in str(e).upper():
+                logger.warning(f"SSL error checking existing file {filename}, skipping check")
+            else:
+                logger.warning(f"Error checking existing file {filename}: {str(e)}")
             return []
     
     def _get_optimal_chunk_size(self, file_size: int) -> int:
