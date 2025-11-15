@@ -3162,6 +3162,21 @@ async def get_user_storage(current_user: str = Depends(get_current_user)):
         "storage_percentage": (total_size / storage_limit * 100) if total_size > 0 else 0
     }
 
+@app.post("/update-last-login")
+async def update_last_login(current_user: str = Depends(get_current_user)):
+    """Update user's last login timestamp"""
+    try:
+        current_time = datetime.utcnow().isoformat()
+        success = update_user_in_firestore(current_user, {'last_login': current_time})
+        
+        if success:
+            return {"message": "Last login updated successfully", "last_login": current_time}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update last login")
+    except Exception as e:
+        print(f"Error updating last login for {current_user}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update last login")
+
 @app.get("/whoami")
 async def whoami(current_user: str = Depends(get_current_user)):
     """Debug endpoint to check current user"""
