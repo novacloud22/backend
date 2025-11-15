@@ -46,9 +46,9 @@ class OptimizedUploadProcessor:
         self.semaphore = asyncio.Semaphore(max_workers)
         self.active_uploads = weakref.WeakSet()
         
-        # Set conservative timeouts
+        # Set very long timeout for reliability
         import socket
-        socket.setdefaulttimeout(300)  # 5 minutes
+        socket.setdefaulttimeout(600)  # 10 minutes
         
     async def process_batch_upload(
         self,
@@ -80,9 +80,9 @@ class OptimizedUploadProcessor:
             # Force garbage collection between chunks
             gc.collect()
             
-            # Minimal delay for faster processing
+            # Longer delay to prevent overwhelming
             if chunk_idx < len(chunks) - 1:
-                await asyncio.sleep(0.5)  # 500ms
+                await asyncio.sleep(5.0)  # 5 seconds
         
         # Calculate statistics
         successful = sum(1 for r in all_results if r.success)
@@ -316,8 +316,8 @@ class ConnectionPool:
                 if len(self.connections) < self.max_connections:
                     self.connections.append(connection)
 
-# Global instances - Balanced settings for 500+ files
-upload_processor = OptimizedUploadProcessor(max_workers=8, chunk_size=20)
+# Global instances - Simple reliable settings
+upload_processor = OptimizedUploadProcessor(max_workers=3, chunk_size=10)
 connection_pool = ConnectionPool(max_connections=5)
 
 # Utility functions for integration with main.py
