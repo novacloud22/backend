@@ -11,6 +11,8 @@ import io
 import uuid
 import asyncio
 import re
+import zipfile
+import tempfile
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
@@ -2117,7 +2119,6 @@ async def stream_file(
                 break
     
     # Sanitize filename for headers
-    import re
     safe_filename = re.sub(r'[<>:"/\\|?*]', '_', file_metadata["name"])
     safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
     if not safe_filename or safe_filename.strip() == '':
@@ -2730,7 +2731,6 @@ async def download_large_file(
         file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
         
         # Sanitize filename
-        import re
         safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
         if not safe_filename or safe_filename.strip() == '':
@@ -2787,9 +2787,6 @@ async def download_file(
         # Check if it's a folder
         if file_metadata.get('mimeType') == 'application/vnd.google-apps.folder':
             # For folders, create a ZIP file
-            import zipfile
-            import tempfile
-            
             def generate_folder_zip():
                 with tempfile.NamedTemporaryFile() as temp_file:
                     with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -2861,7 +2858,6 @@ async def download_file(
         file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
         
         # Sanitize filename for download while preserving extension
-        import re
         safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         # Remove Unicode characters that can't be encoded in Latin-1
         safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
@@ -3522,7 +3518,6 @@ async def request_email_change(
     new_email = new_email.strip().lower()
     
     # Validate email format
-    import re
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     if not re.match(email_pattern, new_email):
         raise HTTPException(status_code=400, detail="Invalid email format")
@@ -4934,7 +4929,6 @@ async def download_shared_file(share_token: str, file_id: Optional[str] = None):
     proper_mime_type = mime_types.get(file_extension, 'application/octet-stream')
     
     # Sanitize filename for HTTP headers (Latin-1 encoding)
-    import re
     safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
     # Remove Unicode characters that can't be encoded in Latin-1
     safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
@@ -5359,9 +5353,6 @@ async def download_shared_email_file(share_id: str, current_user: Optional[str] 
         # Check if it's a folder
         if file_metadata.get('mimeType') == 'application/vnd.google-apps.folder':
             # Handle folder download as ZIP
-            import zipfile
-            import tempfile
-            
             def generate_folder_zip():
                 with tempfile.NamedTemporaryFile() as temp_file:
                     with zipfile.ZipFile(temp_file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -5395,7 +5386,6 @@ async def download_shared_email_file(share_id: str, current_user: Optional[str] 
                         yield chunk
             
             folder_name = file_metadata['name']
-            import re
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', folder_name)
             # Remove Unicode characters that can't be encoded in Latin-1
             safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
@@ -5431,7 +5421,6 @@ async def download_shared_email_file(share_id: str, current_user: Optional[str] 
                     file_io.truncate(0)
         
         filename = file_metadata.get('name', 'file')
-        import re
         safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
         # Remove Unicode characters that can't be encoded in Latin-1
         safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
