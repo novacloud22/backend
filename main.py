@@ -354,11 +354,7 @@ def get_google_service():
             else:
                 return None
         
-        # Create HTTP client with SSL configuration
-        http = httplib2.Http(timeout=60)
-        http = creds.authorize(http)
-        
-        return build('drive', 'v3', http=http, cache_discovery=False)
+        return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         print(f"Error getting Google service: {str(e)}")
         return None
@@ -566,11 +562,7 @@ def get_user_google_service(user_email: str, drive_id: str = "drive_1"):
                 print(f"Invalid credentials for {user_email} - {drive_id}")
                 return None
         
-        # Create HTTP client with SSL configuration
-        http = httplib2.Http(timeout=60)
-        http = creds.authorize(http)
-        
-        service = build('drive', 'v3', http=http, cache_discovery=False)
+        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
         print(f"Successfully created service for {user_email} - {drive_id}")
         
         # Quick test to ensure service works
