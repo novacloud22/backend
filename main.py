@@ -263,6 +263,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 print(f"Auto-created user record for {user_identifier} with auth method: {auth_method}")
             except Exception as create_error:
                 print(f"Failed to auto-create user record: {str(create_error)}")
+        else:
+            # Update last_login for existing users on every authentication
+            try:
+                current_time = datetime.utcnow().isoformat()
+                update_user_in_firestore(user_identifier, {'last_login': current_time})
+                print(f"Updated last_login for {user_identifier} to {current_time}")
+            except Exception as update_error:
+                print(f"Failed to update last_login for {user_identifier}: {str(update_error)}")
         
         return user_identifier
     except Exception as e:
@@ -912,6 +920,22 @@ async def check_github_linked(githubEmail: str):
 
 
 
+@app.post("/update-last-login")
+async def update_last_login(current_user: str = Depends(get_current_user)):
+    """Update the last login time for the current user"""
+    try:
+        current_time = datetime.utcnow().isoformat()
+        success = update_user_in_firestore(current_user, {'last_login': current_time})
+        
+        if success:
+            print(f"Successfully updated last_login for {current_user} to {current_time}")
+            return {"message": "Last login updated successfully", "last_login": current_time}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update last login")
+    except Exception as e:
+        print(f"Error updating last login for {current_user}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update last login")
+
 @app.post("/register-user")
 async def register_user(user_data: UserCreate, current_user: Optional[str] = Depends(get_optional_current_user)):
     """Register a new user in the database"""
@@ -988,11 +1012,13 @@ async def register_user(user_data: UserCreate, current_user: Optional[str] = Dep
         else:
             # Same UID, just update login time and potentially update name if we got GitHub username
             print(f"Same UID, updating login time for {user_data.email}")
-            updates = {"last_login": datetime.utcnow().isoformat()}
+            current_time = datetime.utcnow().isoformat()
+            updates = {"last_login": current_time}
             if github_username and github_username != existing_user.get('name'):
                 updates["name"] = github_username
                 print(f"Updated name to GitHub username: {github_username}")
             update_user_in_firestore(user_data.email, updates)
+            print(f"Updated last_login for {user_data.email} to {current_time}")
             return {"message": "Welcome back!"}
     
     # Create new user (no existing record)
@@ -2335,19 +2361,21 @@ async def list_files(
             # User not found in Firestore, create minimal user record
             try:
                 firebase_user = auth.get_user_by_email(current_user)
+                current_time = datetime.utcnow().isoformat()
                 new_user = {
                     "email": current_user,
                     "name": firebase_user.display_name or "User",
                     "uid": firebase_user.uid,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": current_time,
                     "storage_used": 0,
                     "total_files": 0,
                     "total_folders": 0,
-                    "last_login": datetime.utcnow().isoformat(),
+                    "last_login": current_time,
                     "folder_id": None
                 }
                 save_user_to_firestore(current_user, new_user)
                 user_data = new_user
+                print(f"Auto-created user record in list_files for {current_user} with last_login: {current_time}")
             except Exception as e:
                 print(f"Error creating user record: {str(e)}")
                 return []
@@ -3091,19 +3119,21 @@ async def get_user_storage(current_user: str = Depends(get_current_user)):
         # Create user record if missing
         try:
             firebase_user = auth.get_user_by_email(current_user)
+            current_time = datetime.utcnow().isoformat()
             new_user = {
                 "email": current_user,
                 "name": firebase_user.display_name or "User",
                 "uid": firebase_user.uid,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": current_time,
                 "storage_used": 0,
                 "total_files": 0,
                 "total_folders": 0,
-                "last_login": datetime.utcnow().isoformat(),
+                "last_login": current_time,
                 "folder_id": None
             }
             save_user_to_firestore(current_user, new_user)
             user_data = new_user
+            print(f"Auto-created user record in get_user_storage for {current_user} with last_login: {current_time}")
         except Exception as e:
             print(f"Error creating user record: {str(e)}")
             raise HTTPException(status_code=404, detail="User not found")
